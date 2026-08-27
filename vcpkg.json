@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "native-player",
+  "version-string": "0.1.0",
+  "description": "Native PiP video player for the platform launcher",
+  "builtin-baseline": "3c5d90a305ff00ca841f085a74a7ce74ee777dee",
+  "supports": "windows & x64",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "swresample",
+        "swscale"
+      ]
+    },
+     "nlohmann-json"
+  ]
+}

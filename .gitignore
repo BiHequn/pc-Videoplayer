@@ -1,0 +1,9 @@
+!**/*.sln
+
+**/.vs/
+**/Debug/
+**/Release/
+**/x64/
+**/*.vcxproj.user
+vcpkg_installed/
+third_party/ffmpeg/
