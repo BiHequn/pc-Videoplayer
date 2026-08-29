@@ -44,7 +44,7 @@ int runNativePlayer(int argc, char* argv[])
   }
 
   DecodedVideoFrame firstFrame = {};
-  if (!decodeFirstFfmpegFrame(&firstFrame))
+  if (!decodeNextFfmpegFrame(&firstFrame))
   {
     closeFfmpegVideo();
     shutdownFfmpeg();
@@ -66,6 +66,13 @@ int runNativePlayer(int argc, char* argv[])
     closeFfmpegVideo();
     shutdownFfmpeg();
     return 4;
+  }
+
+  if (!startPipPlaybackTimer())
+  {
+      closeFfmpegVideo();
+      shutdownFfmpeg();
+      return 5;
   }
   startCloseWatcher();
   sendReady();

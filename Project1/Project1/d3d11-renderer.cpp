@@ -248,3 +248,15 @@ void shutdownD3D11()
     g_device = nullptr;
   }
 }
+
+void setD3D11Brightness(float brightness)
+{
+    if (!g_context)
+        return;
+    setD3D11ShaderBrightness(
+        g_context,
+        brightness);
+
+    //立即重绘当前视频帧
+    renderD3D11();
+}

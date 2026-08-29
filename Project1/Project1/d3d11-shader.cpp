@@ -6,6 +6,13 @@
 static ID3D11VertexShader* g_vertexShader = nullptr;
 static ID3D11PixelShader* g_pixelShader = nullptr;
 
+static ID3D11Buffer* g_brightnessBuffer = nullptr;
+
+struct BrightnessData
+{
+    float brightness;
+    float padding[3];
+};
 
 // 使用全屏三角形，避免创建顶点缓冲区和 InputLayout。
 static const char g_shaderSource[] = R"(
@@ -14,6 +21,12 @@ static const char g_shaderSource[] = R"(
 Texture2D videoTexture : register(t0);
 //纹理采样器绑定到Pixel Shader的s0
 SamplerState videoSampler : register(s0);
+
+cbuffer BrightnessBuffer:register(b0)
+{
+ float brightness;
+ float3 brightnessPadding;
+};
 
 struct VertexOutput
 {
@@ -46,7 +59,9 @@ float4 pixelMain(VertexOutput input):SV_TARGET
 {
   //从ffmpeg解码并上传BGRA纹理中取样
  float4 color=videoTexture.Sample(videoSampler,input.uv);
- return float4(color.rgb,1.0);
+ return float4(
+    saturate(color.rgb*brightness),
+   1.0);
 }
 )";
 
@@ -124,32 +139,98 @@ bool initializeD3D11Shaders(ID3D11Device* device)
     shutdownD3D11Shaders();
     return false;
   }
+  D3D11_BUFFER_DESC bufferDesc = {};
+  bufferDesc.ByteWidth = sizeof(BrightnessData);
+  bufferDesc.Usage = D3D11_USAGE_DEFAULT;
+  bufferDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
+  BrightnessData initialData = {};
+  initialData.brightness = 1.0f;
+
+  D3D11_SUBRESOURCE_DATA resourceData = {};
+  resourceData.pSysMem = &initialData;
+
+  result = device->CreateBuffer(
+      &bufferDesc,
+      &resourceData,
+      &g_brightnessBuffer);
+
+  if (FAILED(result))
+  {
+      shutdownD3D11Shaders();
+      return false;
+  }
   return true;
 }
 
+
+
 bool bindD3D11Shaders(ID3D11DeviceContext* context)
 {
-  if (!context || !g_vertexShader || !g_pixelShader)
-    return false;
+    if (!context ||
+        !g_vertexShader ||
+        !g_pixelShader ||
+        !g_brightnessBuffer)
+    {
+        return false;
+    }
 
-  context->VSSetShader(g_vertexShader, nullptr, 0);
-  context->PSSetShader(g_pixelShader, nullptr, 0);
-  return true;
+    context->VSSetShader(
+        g_vertexShader,
+        nullptr,
+        0);
+
+    context->PSSetShader(
+        g_pixelShader,
+        nullptr,
+        0);
+
+    context->PSSetConstantBuffers(
+        0,
+        1,
+        &g_brightnessBuffer);
+
+    return true;
 }
 
 void shutdownD3D11Shaders()
 {
-  // Shader 必须在 D3D11 Device 之前释放。
-  if (g_pixelShader)
-  {
-    g_pixelShader->Release();
-    g_pixelShader = nullptr;
-  }
+    if (g_brightnessBuffer)
+    {
+        g_brightnessBuffer->Release();
+        g_brightnessBuffer = nullptr;
+    }
 
-  if (g_vertexShader)
-  {
-    g_vertexShader->Release();
-    g_vertexShader = nullptr;
-  }
+    if (g_pixelShader)
+    {
+        g_pixelShader->Release();
+        g_pixelShader = nullptr;
+    }
+
+    if (g_vertexShader)
+    {
+        g_vertexShader->Release();
+        g_vertexShader = nullptr;
+    }
+}
+
+void setD3D11ShaderBrightness(
+    ID3D11DeviceContext* context,
+    float brightness)
+{
+    if (!context || !g_brightnessBuffer)
+    {
+        return;
+    }
+
+    BrightnessData data = {};
+    data.brightness = brightness;
+
+    context->UpdateSubresource(
+        g_brightnessBuffer,
+        0,
+        nullptr,
+        &data,
+        0,
+        0);
 }

@@ -1,8 +1,17 @@
 #include "pip-window.h"
 #include"d3d11-renderer.h"
 #include <windows.h>
+#include"ffmpeg-decoder.h"
 
 static HWND g_hwnd = 0;
+//临时按约30帧播放，1000/30约等于33毫秒
+static const UINT_PTR kPlaybackTimerId = 1;
+
+static const UINT kSetOpacityMessage = WM_APP + 1;
+static const UINT kSetBrightnessMessage = WM_APP + 2;
+static const UINT kSetPausedMessage = WM_APP + 3;
+
+
 //缩放时保持16:9
 static void keep16By9AspectRatio(WPARAM edge, RECT* rect)
 {
@@ -65,6 +74,76 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
     return 0;
 
   }
+  if (msg == WM_TIMER && wParam == kPlaybackTimerId)
+  {
+      DecodedVideoFrame frame = {};
+
+      if (!decodeNextFfmpegFrame(&frame))
+      {
+          KillTimer(hwnd, kPlaybackTimerId);
+          DestroyWindow(hwnd);
+          return 0;
+      }
+
+      if (!showPipVideoFrame(
+          frame.data,
+          frame.width,
+          frame.height,
+          frame.stride))
+      {
+          KillTimer(hwnd, kPlaybackTimerId);
+          DestroyWindow(hwnd);
+          return 0;
+      }
+
+      return 0;
+  }
+  if (msg == kSetPausedMessage)
+  {
+      bool paused = wParam != 0;
+      if (paused)
+      {
+          //停止视频定时器，并暂停系统音频输出
+          KillTimer(hwnd, kPlaybackTimerId);
+          setFfmpegAudioPaused(true);
+      }
+      else
+      {
+          //恢复音频，并重新启动视频定时器
+          setFfmpegAudioPaused(false);
+          SetTimer(
+              hwnd,
+              kPlaybackTimerId,
+              getFfmpegFrameIntervalMs(),
+              nullptr);
+      }
+      return 0;
+  }
+
+  //亮度处理
+  if (msg == kSetBrightnessMessage)
+  {
+      int  brightnessPercent =static_cast<int>(wParam);
+      float brightness = static_cast<float>(brightnessPercent) /
+          100.0f;
+      setD3D11Brightness(brightness);
+      return 0;
+  }
+  if (msg == kSetOpacityMessage)
+  {
+      int opacityPercent = static_cast<int>(wParam);
+      BYTE alpha = static_cast<BYTE>(
+          255 * opacityPercent / 100);
+
+      SetLayeredWindowAttributes(
+          hwnd,
+          0,
+          alpha,
+          LWA_ALPHA);
+
+      return 0;
+  }
+
   if (msg == WM_PAINT)
   {
     PAINTSTRUCT ps;
@@ -76,6 +155,7 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
   }
   if (msg == WM_DESTROY)
   {
+    KillTimer(hwnd, kPlaybackTimerId);
     shutdownD3D11();
     g_hwnd = 0;
     PostQuitMessage(0);
@@ -99,7 +179,7 @@ bool createPipWindow()
   RegisterClass(&wc);
 
   g_hwnd = CreateWindowEx(
-    WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
     L"NativePlayerPip",
     L"Native Player",
     WS_POPUP | WS_THICKFRAME,
@@ -109,17 +189,38 @@ bool createPipWindow()
   if (!g_hwnd)
     return false;
 
+  //分层窗口创建后默认保持完全可见
+  SetLayeredWindowAttributes(
+      g_hwnd,
+      0,
+      255,
+      LWA_ALPHA);
+
+
   if (!initializeD3D11(g_hwnd))
   {
     DestroyWindow(g_hwnd);
     g_hwnd = 0;
     return false;
   }
-
   ShowWindow(g_hwnd, SW_SHOW);
   renderD3D11();
   return true;
 }
+
+
+bool startPipPlaybackTimer()
+{
+    if (!g_hwnd)
+        return false;
+    UINT_PTR timerId = SetTimer(
+        g_hwnd,
+        kPlaybackTimerId,
+        getFfmpegFrameIntervalMs(),
+        nullptr);
+    return timerId != 0;
+}
+
 
 void runPipWindowLoop()
 {
@@ -139,6 +240,40 @@ void requestPipWindowClose()
     PostMessage(g_hwnd, WM_CLOSE, 0, 0);
 }
 
+void requestPipWindowOpacity(int opacityPercent)
+{
+    if (!g_hwnd)
+        return;
+    PostMessage(
+        g_hwnd,
+        kSetOpacityMessage,
+        static_cast<WPARAM>(opacityPercent),
+        0);
+}
+
+void requestPipWindowPaused(bool paused)
+{
+    if (!g_hwnd)
+        return;
+    PostMessage(
+        g_hwnd,
+        kSetPausedMessage,
+        paused ? 1 : 0,
+        0);
+}
+
+void requestPipWindowBrightness(
+    int brightnessPercent)
+{
+    if (!g_hwnd)
+        return;
+
+    PostMessage(
+        g_hwnd,
+        kSetBrightnessMessage,
+        static_cast<WPARAM>(brightnessPercent),
+        0);
+}
 bool showPipVideoFrame(
   const unsigned char* data,
   int width,
