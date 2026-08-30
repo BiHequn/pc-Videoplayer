@@ -32,6 +32,8 @@ static std::vector<unsigned char>g_bgraBuffer;
 static unsigned int g_frameIntervalMs = 33;
 //pts
 static int g_videoPtsLogCount = 0;
+static double g_audioStartPtsSeconds = -1.0;
+static int g_audioPtsLogCount = 0;
 
 static HWAVEOUT g_audioOutput = nullptr;
 
@@ -229,9 +231,7 @@ bool openFfmpegVideo(const char* source)
           << " Hz, "
           << g_audioCodecContext->ch_layout.nb_channels
           << " channels"
-          << std::endl;
-
-    
+          << std::endl;    
     // 把 AAC 解码器输出的 float planar 转成 S16 交错 PCM。
       int swrResult = swr_alloc_set_opts2(
           &g_audioResampleContext,
@@ -473,6 +473,21 @@ bool decodeNextFfmpegFrame(DecodedVideoFrame* output)
 
             if (convertedSamples > 0)
             {
+                double audioPtsSeconds = -1.0;
+                if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                {
+                    AVStream* audioStream = g_formatContext->streams[g_audioStreamIndex];
+                    audioPtsSeconds = frame->best_effort_timestamp* av_q2d(audioStream->time_base);
+                    if (g_audioStartPtsSeconds < 0.0)
+                    {
+                        g_audioStartPtsSeconds = audioPtsSeconds;
+                    }
+                }
+                if (g_audioPtsLogCount < 10)
+                {
+                    std::cerr << "Audio PTS: " << audioPtsSeconds << " seconds" << std::endl;
+                    ++g_audioPtsLogCount;
+                }
                 g_audioPcmBuffer.resize(
                     static_cast<size_t>(convertedSamples) *
                     g_audioChannels *
@@ -487,8 +502,11 @@ bool decodeNextFfmpegFrame(DecodedVideoFrame* output)
                     if ((audioHeader.dwFlags & WHDR_PREPARED) != 0 &&
                         (audioHeader.dwFlags & WHDR_DONE) == 0)
                     {
-                        Sleep(1);
-                    }
+                        while ((audioHeader.dwFlags & WHDR_DONE) == 0)
+                        {
+                            Sleep(1);
+                        }
+                        }
 
                     // 释放已经播放完成的旧 Header。
                     if ((audioHeader.dwFlags & WHDR_PREPARED) != 0)
@@ -707,6 +725,9 @@ void closeFfmpegVideo()
   g_audioStreamIndex = -1;
   g_videoPtsLogCount = 0;
 
+  g_audioPtsLogCount = 0;
+  g_audioStartPtsSeconds = -1.0;
+
 }
 
 void setFfmpegAudioPaused(bool paused)
@@ -721,4 +742,33 @@ void setFfmpegAudioPaused(bool paused)
     {
         waveOutRestart(g_audioOutput);
     }
+}
+
+//建立waveout实际时钟，用来观测
+double getFfmpegAudioClockSeconds()
+{
+    if(!g_audioOutput || g_audioSampleRate <= 0 || g_audioStartPtsSeconds < 0.0)
+    {
+        return -1.0;
+    }
+    MMTIME position = {};
+    position.wType = TIME_SAMPLES;
+    MMRESULT result = waveOutGetPosition(
+       g_audioOutput, &position, sizeof(position));
+    if (result != MMSYSERR_NOERROR)
+    {
+        return -1.0;
+    }
+    if (position.wType == TIME_SAMPLES)
+    {
+        return g_audioStartPtsSeconds + static_cast<double>(position.u.sample) / g_audioSampleRate;
+    }
+    //部分音频设备可能自己返回已经播放的字节数
+    if (position.wType == TIME_BYTES)
+    {
+        int bytesPerSeconds = g_audioSampleRate * g_audioChannels * 2;
+        return g_audioStartPtsSeconds + static_cast<double>(position.u.cb) / bytesPerSeconds;
+    }
+    return -1.0;
+    
 }

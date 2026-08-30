@@ -21,3 +21,5 @@ int getFfmpegAudioChannels();
 size_t getFfmpegAudioPcmBytes();
 
 void setFfmpegAudioPaused(bool paused);
+
+double getFfmpegAudioClockSeconds();

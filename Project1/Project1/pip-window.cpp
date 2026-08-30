@@ -2,6 +2,7 @@
 #include"d3d11-renderer.h"
 #include <windows.h>
 #include"ffmpeg-decoder.h"
+#include<iostream>
 
 static HWND g_hwnd = 0;
 //临时按约30帧播放，1000/30约等于33毫秒
@@ -10,6 +11,8 @@ static const UINT_PTR kPlaybackTimerId = 1;
 static const UINT kSetOpacityMessage = WM_APP + 1;
 static const UINT kSetBrightnessMessage = WM_APP + 2;
 static const UINT kSetPausedMessage = WM_APP + 3;
+
+static int g_clockLogCount = 0;
 
 
 //缩放时保持16:9
@@ -83,6 +86,22 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
           KillTimer(hwnd, kPlaybackTimerId);
           DestroyWindow(hwnd);
           return 0;
+      }
+
+      double audioClock = getFfmpegAudioClockSeconds();
+      if (g_clockLogCount < 20 && audioClock >= 0.0 && frame.ptsSeconds >= 0.0)
+      {
+          double difference = frame.ptsSeconds - audioClock;
+          std::cerr
+              << "Sync: video="
+              << frame.ptsSeconds
+              << ", audio="
+              << audioClock
+              << ", diff="
+              << difference
+              << " seconds"
+              << std::endl;
+          ++g_clockLogCount;
       }
 
       if (!showPipVideoFrame(

@@ -87,5 +87,4 @@ void sendReady()
 void startCloseWatcher()
 {
   CreateThread(0, 0, StdinThread, 0, 0, 0);
- 
 }
