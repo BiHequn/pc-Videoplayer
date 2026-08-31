@@ -33,22 +33,36 @@ static const char* parseSource(int argc, char* argv[])
 
 int runNativePlayer(int argc, char* argv[])
 {
+  const char* source = parseSource(argc, argv);
+  if (!source || source[0] == '\0')
+  {
+    fprintf(stderr,
+      "Usage: native-player.exe --source <file-or-url> "
+      "[--parent-pid <pid>]\n");
+    return 1;
+  }
+
   startParentWatch(parseParentPid(argc, argv));
 
   if (!initializeFfmpeg())
     return 1;
-  if (!openFfmpegVideo(parseSource(argc, argv)))
+  if (!openFfmpegVideo(source))
   {
     shutdownFfmpeg();
     return 2;
   }
 
   DecodedVideoFrame firstFrame = {};
-  if (!decodeNextFfmpegFrame(&firstFrame))
+  while (!decodeNextFfmpegFrame(&firstFrame))
   {
-    closeFfmpegVideo();
-    shutdownFfmpeg();
-    return 3;
+    if (isFfmpegVideoFinished())
+    {
+      closeFfmpegVideo();
+      shutdownFfmpeg();
+      return 3;
+    }
+
+    Sleep(1);
   }
   if (!createPipWindow())
   {
@@ -67,6 +81,8 @@ int runNativePlayer(int argc, char* argv[])
     shutdownFfmpeg();
     return 4;
   }
+
+  startFfmpegPlayback();
 
   if (!startPipPlaybackTimer())
   {

@@ -45,6 +45,12 @@
     <ClCompile Include="d3d11-video-texture.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="media-packet-queue.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="video-frame-queue.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pip-window.h">
@@ -72,6 +78,12 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="d3d11-video-texture.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="media-packet-queue.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="video-frame-queue.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

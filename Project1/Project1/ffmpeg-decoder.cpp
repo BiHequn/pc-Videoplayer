@@ -1,8 +1,13 @@
-#include "ffmpeg-decoder.h"
+#include"ffmpeg-decoder.h"
 #include<Windows.h>
 #include<mmsystem.h>
+#include"media-packet-queue.h"
+#include"video-frame-queue.h"
 
+#include <atomic>
 #include <iostream>
+#include <thread>
+#include <utility>
 #include<vector>
 
 extern "C"
@@ -13,6 +18,8 @@ extern "C"
 #include<libswscale/swscale.h>
 #include<libswresample/swresample.h>
 }
+
+
 
 static AVFormatContext* g_formatContext = nullptr;
 static AVCodecContext* g_codecContext = nullptr;
@@ -32,7 +39,7 @@ static std::vector<unsigned char>g_bgraBuffer;
 static unsigned int g_frameIntervalMs = 33;
 //pts
 static int g_videoPtsLogCount = 0;
-static double g_audioStartPtsSeconds = -1.0;
+static std::atomic<double> g_audioStartPtsSeconds(-1.0);
 static int g_audioPtsLogCount = 0;
 
 static HWAVEOUT g_audioOutput = nullptr;
@@ -43,6 +50,31 @@ static std::vector<unsigned char>
 static WAVEHDR
 g_audioHeaders[kAudioBufferCount] = {};
 static int g_nextAudioBuffer = 0;
+
+//增加线程处理队列
+static MediaPacketQueue g_audioPacketQueue;
+static MediaPacketQueue g_videoPacketQueue;
+static VideoFrameQueue g_videoFrameQueue;
+
+static std::thread g_demuxThread;
+static std::thread g_audioDecodeThread;
+static std::thread g_videoDecodeThread;
+
+static std::atomic<bool> g_playbackRunning(false);
+static std::atomic<bool> g_playbackPaused(false);
+static std::atomic<bool> g_outputStarted(false);
+static std::atomic<bool> g_videoDecodeFinished(false);
+static std::atomic<bool> g_audioDecodeFinished(true);
+static std::atomic<bool> g_abortRequested(false);
+static QueuedVideoFrame g_displayFrame;
+
+static const size_t kAudioPacketQueueSize = 32;
+static const size_t kVideoPacketQueueSize = 16;
+static const size_t kVideoFrameQueueSize = 6;
+
+static void audioDecodeThreadMain();
+static void videoDecodeThreadMain();
+static bool startPlaybackThreads();
 
 static void printFfmpegError(const char* operation, int errorCode)
 {
@@ -56,6 +88,82 @@ static void printFfmpegError(const char* operation, int errorCode)
     << std::endl;
 }
 
+static int ffmpegInterruptCallback(void*)
+{
+    return g_abortRequested.load() ? 1 : 0;
+}
+
+static void demuxThreadMain()
+{
+    AVPacket* packet = av_packet_alloc();
+    if (!packet)
+    {
+        std::cerr
+            << "av_packet_alloc for demux failed."
+            << std::endl;
+
+        finishMediaPacketQueue(&g_audioPacketQueue);
+        finishMediaPacketQueue(&g_videoPacketQueue);
+        return;
+    }
+
+    // 只有解封装线程可以调用 av_read_frame。
+    while (g_playbackRunning.load())
+    {
+        if (g_playbackPaused.load())
+        {
+            Sleep(1);
+            continue;
+        }
+
+        const int result = av_read_frame(
+            g_formatContext,
+            packet);
+
+        if (result < 0)
+        {
+            break;
+        }
+
+        bool pushed = true;
+
+        if (packet->stream_index == g_audioStreamIndex)
+        {
+            // 首帧显示前音频线程还没启动输出，暂时不限制队列长度。
+            size_t maxPacketCount =
+                g_outputStarted.load() ?
+                kAudioPacketQueueSize : 0;
+
+            pushed = pushMediaPacket(
+                &g_audioPacketQueue,
+                packet,
+                maxPacketCount);
+        }
+        else if (packet->stream_index == g_videoStreamIndex)
+        {
+            pushed = pushMediaPacket(
+                &g_videoPacketQueue,
+                packet,
+                kVideoPacketQueueSize);
+        }
+
+        // 队列内部已经 clone，原始 packet 可以解除引用并复用。
+        av_packet_unref(packet);
+
+        if (!pushed)
+        {
+            break;
+        }
+    }
+
+    // packet 本体必须等循环完全结束后再释放。
+    av_packet_free(&packet);
+
+    // 通知两个解码线程后面不会再有新的 packet。
+    finishMediaPacketQueue(&g_audioPacketQueue);
+    finishMediaPacketQueue(&g_videoPacketQueue);
+}
+
 bool openFfmpegVideo(const char* source)
 {
   if (!source || source[0] == '\0')
@@ -65,6 +173,20 @@ bool openFfmpegVideo(const char* source)
   }
 
   closeFfmpegVideo();
+  g_abortRequested.store(false);
+
+  g_formatContext = avformat_alloc_context();
+  if (!g_formatContext)
+  {
+      std::cerr
+          << "avformat_alloc_context failed."
+          << std::endl;
+      return false;
+  }
+
+  g_formatContext->interrupt_callback.callback =
+      ffmpegInterruptCallback;
+  g_formatContext->interrupt_callback.opaque = nullptr;
 
   // FFmpeg 自动识别本地文件或网络 URL 的封装格式。
   int result = avformat_open_input(
@@ -293,7 +415,6 @@ bool openFfmpegVideo(const char* source)
           // 音频设备打开失败时，仍然允许继续播放画面。
           g_audioOutput = nullptr;
       }
-
   }
   else
   {
@@ -311,6 +432,11 @@ bool openFfmpegVideo(const char* source)
     << g_codecContext->height
     << std::endl;
 
+  if (!startPlaybackThreads())
+  {
+      closeFfmpegVideo();
+      return false;
+  }
 
   return true;
 }
@@ -388,276 +514,486 @@ static bool convertFrameToBgra(const AVFrame* frame,DecodedVideoFrame* output)
 
   return true;
 }
-bool decodeNextFfmpegFrame(DecodedVideoFrame* output)
+
+//音频辅助函数
+static void decodeAudioPacket(const AVPacket* packet, AVFrame* frame)
 {
-    if (!output || !g_formatContext ||
-        !g_codecContext || g_videoStreamIndex < 0)
+    int audioResult = avcodec_send_packet(
+        g_audioCodecContext,
+        packet);
+
+    if (audioResult < 0)
     {
-        return false;
+        printFfmpegError(
+            "avcodec_send_packet for audio",
+            audioResult);
+        return;
     }
 
-    *output = {};
-
-    AVPacket* packet = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
-
-    if (!packet || !frame)
+    while (g_playbackRunning.load())
     {
-        av_packet_free(&packet);
-        av_frame_free(&frame);
+      audioResult = avcodec_receive_frame(
+          g_audioCodecContext,
+          frame);
 
-        std::cerr
-            << "Failed to allocate packet or frame."
-            << std::endl;
-        return false;
-    }
+      if (audioResult == AVERROR(EAGAIN) ||
+          audioResult == AVERROR_EOF)
+      {
+          return;
+      }
 
-    bool decoded = false;
+      if (audioResult < 0)
+      {
+          printFfmpegError(
+              "avcodec_receive_frame for audio",
+              audioResult);
+          return;
+      }
 
-    // 不断读取压缩包，直到视频解码器输出一帧。
-    while (av_read_frame(g_formatContext, packet) >= 0)
+    // S16 每个声道的一个采样占 2 字节。
+    const size_t pcmSize =
+        static_cast<size_t>(frame->nb_samples) *
+        g_audioChannels *
+        2;
+
+    g_audioPcmBuffer.resize(pcmSize);
+
+    unsigned char* outputData[1] = {
+        g_audioPcmBuffer.data()
+    };
+
+    int convertedSamples = swr_convert(
+        g_audioResampleContext,
+        outputData,
+        frame->nb_samples,
+        const_cast<const unsigned char**>(
+            frame->extended_data),
+        frame->nb_samples);
+
+    if (convertedSamples > 0)
     {
-        // 遇到音频包时，解码并转换成 S16 交错 PCM。
-        if (g_audioCodecContext &&
-            g_audioResampleContext &&
-            packet->stream_index == g_audioStreamIndex)
+        double audioPtsSeconds = -1.0;
+
+        if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
         {
-            int audioResult = avcodec_send_packet(
-                g_audioCodecContext,
-                packet);
+            AVStream* audioStream =
+                g_formatContext->streams[g_audioStreamIndex];
 
-            av_packet_unref(packet);
+            audioPtsSeconds =
+                frame->best_effort_timestamp *
+                av_q2d(audioStream->time_base);
 
-            if (audioResult < 0)
+            if (g_audioStartPtsSeconds.load() < 0.0)
             {
-                printFfmpegError(
-                    "avcodec_send_packet for audio",
-                    audioResult);
-                continue;
+                g_audioStartPtsSeconds.store(audioPtsSeconds);
+            }
+        }
+
+        if (g_audioPtsLogCount < 10)
+        {
+            std::cerr
+                << "Audio PTS: "
+                << audioPtsSeconds
+                << " seconds"
+                << std::endl;
+
+            ++g_audioPtsLogCount;
+        }
+
+        g_audioPcmBuffer.resize(
+            static_cast<size_t>(convertedSamples) *
+            g_audioChannels *
+            2);
+
+        if (g_audioOutput)
+        {
+            WAVEHDR& audioHeader =
+                g_audioHeaders[g_nextAudioBuffer];
+
+            // 缓冲区仍在播放时等待，防止覆盖正在播放的数据。
+            if ((audioHeader.dwFlags & WHDR_PREPARED) != 0 &&
+                (audioHeader.dwFlags & WHDR_DONE) == 0)
+            {
+                while ((audioHeader.dwFlags & WHDR_DONE) == 0)
+                {
+                    if (!g_playbackRunning.load())
+                    {
+                        av_frame_unref(frame);
+                        return;
+                    }
+                    Sleep(1);
+                }
             }
 
-            audioResult = avcodec_receive_frame(
-                g_audioCodecContext,
-                frame);
-
-            if (audioResult == AVERROR(EAGAIN))
-                continue;
-
-            if (audioResult < 0)
+            // 释放已经播放完成的旧 Header。
+            if ((audioHeader.dwFlags & WHDR_PREPARED) != 0)
             {
-                printFfmpegError(
-                    "avcodec_receive_frame for audio",
-                    audioResult);
-                continue;
+                waveOutUnprepareHeader(
+                    g_audioOutput,
+                    &audioHeader,
+                    sizeof(audioHeader));
+
+                audioHeader = {};
             }
 
-            // S16 每个声道的一个采样占 2 字节。
-            const size_t pcmSize =
-                static_cast<size_t>(frame->nb_samples) *
-                g_audioChannels *
-                2;
+            std::vector<unsigned char>& audioBuffer =
+                g_audioBuffers[g_nextAudioBuffer];
 
-            g_audioPcmBuffer.resize(pcmSize);
+            // 异步播放期间必须保证这块 PCM 内存一直存在。
+            audioBuffer = g_audioPcmBuffer;
 
-            unsigned char* outputData[1] = {
-                g_audioPcmBuffer.data()
-            };
+            audioHeader.lpData =
+                reinterpret_cast<LPSTR>(
+                    audioBuffer.data());
 
-            int convertedSamples = swr_convert(
-                g_audioResampleContext,
-                outputData,
-                frame->nb_samples,
-                const_cast<const unsigned char**>(
-                    frame->extended_data),
-                frame->nb_samples);
+            audioHeader.dwBufferLength =
+                static_cast<DWORD>(
+                    audioBuffer.size());
 
-            if (convertedSamples > 0)
+            MMRESULT prepareResult =
+                waveOutPrepareHeader(
+                    g_audioOutput,
+                    &audioHeader,
+                    sizeof(audioHeader));
+
+            if (prepareResult == MMSYSERR_NOERROR)
             {
-                double audioPtsSeconds = -1.0;
-                if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
-                {
-                    AVStream* audioStream = g_formatContext->streams[g_audioStreamIndex];
-                    audioPtsSeconds = frame->best_effort_timestamp* av_q2d(audioStream->time_base);
-                    if (g_audioStartPtsSeconds < 0.0)
-                    {
-                        g_audioStartPtsSeconds = audioPtsSeconds;
-                    }
-                }
-                if (g_audioPtsLogCount < 10)
-                {
-                    std::cerr << "Audio PTS: " << audioPtsSeconds << " seconds" << std::endl;
-                    ++g_audioPtsLogCount;
-                }
-                g_audioPcmBuffer.resize(
-                    static_cast<size_t>(convertedSamples) *
-                    g_audioChannels *
-                    2);
-
-                if (g_audioOutput)
-                {
-                    WAVEHDR& audioHeader =
-                        g_audioHeaders[g_nextAudioBuffer];
-
-                    // 缓冲区仍在播放时，跳过当前音频帧，避免阻塞窗口线程。
-                    if ((audioHeader.dwFlags & WHDR_PREPARED) != 0 &&
-                        (audioHeader.dwFlags & WHDR_DONE) == 0)
-                    {
-                        while ((audioHeader.dwFlags & WHDR_DONE) == 0)
-                        {
-                            Sleep(1);
-                        }
-                        }
-
-                    // 释放已经播放完成的旧 Header。
-                    if ((audioHeader.dwFlags & WHDR_PREPARED) != 0)
-                    {
-                        waveOutUnprepareHeader(
-                            g_audioOutput,
-                            &audioHeader,
-                            sizeof(audioHeader));
-
-                        audioHeader = {};
-                    }
-
-                    std::vector<unsigned char>& audioBuffer =
-                        g_audioBuffers[g_nextAudioBuffer];
-
-                    // 异步播放期间必须保证这块 PCM 内存一直存在。
-                    audioBuffer = g_audioPcmBuffer;
-
-                    audioHeader.lpData =
-                        reinterpret_cast<LPSTR>(
-                            audioBuffer.data());
-
-                    audioHeader.dwBufferLength =
-                        static_cast<DWORD>(
-                            audioBuffer.size());
-
-                    MMRESULT prepareResult = waveOutPrepareHeader(
+                MMRESULT writeResult =
+                    waveOutWrite(
                         g_audioOutput,
                         &audioHeader,
                         sizeof(audioHeader));
 
-                    if (prepareResult == MMSYSERR_NOERROR)
-                    {
-                        MMRESULT writeResult = waveOutWrite(
-                            g_audioOutput,
-                            &audioHeader,
-                            sizeof(audioHeader));
-
-                        if (writeResult == MMSYSERR_NOERROR)
-                        {
-                            g_nextAudioBuffer =
-                                (g_nextAudioBuffer + 1) %
-                                kAudioBufferCount;
-                        }
-                        else
-                        {
-                            waveOutUnprepareHeader(
-                                g_audioOutput,
-                                &audioHeader,
-                                sizeof(audioHeader));
-
-                            audioHeader = {};
-                        }
-                    }
-                }
-
-                if (!g_audioPcmLogged)
+                if (writeResult == MMSYSERR_NOERROR)
                 {
-                    std::cerr
-                        << "Audio PCM decoded: "
-                        << g_audioSampleRate
-                        << " Hz, "
-                        << g_audioChannels
-                        << " channels, "
-                        << g_audioPcmBuffer.size()
-                        << " bytes"
-                        << std::endl;
+                    g_nextAudioBuffer =
+                        (g_nextAudioBuffer + 1) %
+                        kAudioBufferCount;
+                }
+                else
+                {
+                    waveOutUnprepareHeader(
+                        g_audioOutput,
+                        &audioHeader,
+                        sizeof(audioHeader));
 
-                    g_audioPcmLogged = true;
+                    audioHeader = {};
                 }
             }
+        }
 
-            av_frame_unref(frame);
+        if (!g_audioPcmLogged)
+        {
+            std::cerr
+                << "Audio PCM decoded: "
+                << g_audioSampleRate
+                << " Hz, "
+                << g_audioChannels
+                << " channels, "
+                << g_audioPcmBuffer.size()
+                << " bytes"
+                << std::endl;
+
+            g_audioPcmLogged = true;
+        }
+    }
+
+      av_frame_unref(frame);
+    }
+}
+
+static void audioDecodeThreadMain()
+{
+    AVFrame* frame = av_frame_alloc();
+    if (!frame)
+    {
+        std::cerr << "av_frame_alloc for audio failed" << std::endl;
+        g_playbackRunning.store(false);
+        g_audioDecodeFinished.store(true);
+        stopMediaPacketQueue(&g_audioPacketQueue);
+        stopMediaPacketQueue(&g_videoPacketQueue);
+        stopVideoFrameQueue(&g_videoFrameQueue);
+        return;
+    }
+    while (g_playbackRunning.load())
+    {
+        if (!g_outputStarted.load())
+        {
+            Sleep(1);
             continue;
         }
 
-        // 其他无关数据流直接跳过。
-        if (packet->stream_index != g_videoStreamIndex)
+        if (g_playbackPaused.load())
         {
-            av_packet_unref(packet);
+            Sleep(1);
             continue;
         }
 
-        int result = avcodec_send_packet(
-            g_codecContext,
-            packet);
-
-        av_packet_unref(packet);
-
-        if (result < 0)
+        AVPacket* packet = popMediaPacket(&g_audioPacketQueue);
+        //队列完成，停止或者已经没有剩余packet
+        if (!packet)
         {
-            printFfmpegError(
-                "avcodec_send_packet",
-                result);
+            if (g_playbackRunning.load())
+                decodeAudioPacket(nullptr, frame);
             break;
         }
+        decodeAudioPacket(packet, frame);
+        //队列返回的是独立clone的packet,消费完成后由音频线程负责释放
+        av_packet_free(&packet);
+    }
+    av_frame_free(&frame);
 
+    // 文件结束时让已经交给 WaveOut 的尾部音频播完。
+    while (g_playbackRunning.load() && g_audioOutput)
+    {
+        bool allDone = true;
+
+        for (int i = 0; i < kAudioBufferCount; ++i)
+        {
+            if ((g_audioHeaders[i].dwFlags &
+                WHDR_PREPARED) != 0 &&
+                (g_audioHeaders[i].dwFlags &
+                WHDR_DONE) == 0)
+            {
+                allDone = false;
+                break;
+            }
+        }
+
+        if (allDone)
+            break;
+
+        Sleep(1);
+    }
+
+    g_audioDecodeFinished.store(true);
+}
+
+// 把一帧复制进队列，窗口线程拿到的是独立的 BGRA 数据。
+static bool pushDecodedVideoFrame(AVFrame* frame)
+{
+    DecodedVideoFrame output = {};
+
+    if (!convertFrameToBgra(frame, &output))
+    {
+        av_frame_unref(frame);
+        return false;
+    }
+
+    if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
+    {
+        AVStream* videoStream =
+            g_formatContext->streams[g_videoStreamIndex];
+
+        output.ptsSeconds =
+            frame->best_effort_timestamp *
+            av_q2d(videoStream->time_base);
+    }
+    else
+    {
+        output.ptsSeconds = -1.0;
+    }
+
+    if (g_videoPtsLogCount < 10)
+    {
+        std::cerr
+            << "Video PTS: "
+            << output.ptsSeconds
+            << " seconds"
+            << std::endl;
+
+        ++g_videoPtsLogCount;
+    }
+
+    bool pushed = pushVideoFrame(
+        &g_videoFrameQueue,
+        output.data,
+        output.width,
+        output.height,
+        output.stride,
+        output.ptsSeconds,
+        kVideoFrameQueueSize);
+
+    av_frame_unref(frame);
+    return pushed;
+}
+
+static bool decodeVideoPacket(
+    const AVPacket* packet,
+    AVFrame* frame)
+{
+    int result = avcodec_send_packet(
+        g_codecContext,
+        packet);
+
+    if (result < 0 && result != AVERROR_EOF)
+    {
+        printFfmpegError("avcodec_send_packet", result);
+        return false;
+    }
+
+    while (g_playbackRunning.load())
+    {
         result = avcodec_receive_frame(
             g_codecContext,
             frame);
 
-        if (result == AVERROR(EAGAIN))
-            continue;
+        if (result == AVERROR(EAGAIN) ||
+            result == AVERROR_EOF)
+        {
+            return true;
+        }
 
         if (result < 0)
         {
             printFfmpegError(
                 "avcodec_receive_frame",
                 result);
+            return false;
+        }
+
+        if (!pushDecodedVideoFrame(frame))
+            return false;
+    }
+
+    return false;
+}
+
+static void videoDecodeThreadMain()
+{
+    AVFrame* frame = av_frame_alloc();
+    if (!frame)
+    {
+        std::cerr
+            << "av_frame_alloc for video failed."
+            << std::endl;
+        g_videoDecodeFinished.store(true);
+        finishVideoFrameQueue(&g_videoFrameQueue);
+        return;
+    }
+
+    while (g_playbackRunning.load())
+    {
+        if (g_playbackPaused.load())
+        {
+            Sleep(1);
+            continue;
+        }
+
+        AVPacket* packet =
+            popMediaPacket(&g_videoPacketQueue);
+
+        if (!packet)
+        {
+            if (g_playbackRunning.load())
+                decodeVideoPacket(nullptr, frame);
             break;
         }
 
-        decoded = convertFrameToBgra(frame, output);
+        bool decoded = decodeVideoPacket(packet, frame);
+        av_packet_free(&packet);
 
-        if (decoded)
+        if (!decoded)
         {
-            if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
-            {
-                AVStream* videoStream =
-                    g_formatContext->streams[g_videoStreamIndex];
-
-                output->ptsSeconds =
-                    frame->best_effort_timestamp *
-                    av_q2d(videoStream->time_base);
-            }
-            else
-            {
-                // -1 表示当前视频帧没有有效时间戳。
-                output->ptsSeconds = -1.0;
-            }
-
-            // 暂时只打印前 10 帧，避免控制台持续刷屏。
-            if (g_videoPtsLogCount < 10)
-            {
-                std::cerr
-                    << "Video PTS: "
-                    << output->ptsSeconds
-                    << " seconds"
-                    << std::endl;
-
-                ++g_videoPtsLogCount;
-            }
+            g_abortRequested.store(true);
+            g_playbackRunning.store(false);
+            stopMediaPacketQueue(&g_audioPacketQueue);
+            stopMediaPacketQueue(&g_videoPacketQueue);
+            stopVideoFrameQueue(&g_videoFrameQueue);
+            break;
         }
-
-        break;
     }
 
-    av_packet_free(&packet);
     av_frame_free(&frame);
+    finishVideoFrameQueue(&g_videoFrameQueue);
+    g_videoDecodeFinished.store(true);
+}
 
-    return decoded;
+static bool startPlaybackThreads()
+{
+    clearMediaPacketQueue(&g_audioPacketQueue);
+    clearMediaPacketQueue(&g_videoPacketQueue);
+    clearVideoFrameQueue(&g_videoFrameQueue);
+
+    g_playbackPaused.store(false);
+    g_outputStarted.store(false);
+    g_videoDecodeFinished.store(false);
+    g_audioDecodeFinished.store(
+        g_audioStreamIndex < 0);
+    g_playbackRunning.store(true);
+
+    try
+    {
+        g_videoDecodeThread =
+            std::thread(videoDecodeThreadMain);
+
+        if (g_audioStreamIndex >= 0)
+        {
+            g_audioDecodeThread =
+                std::thread(audioDecodeThreadMain);
+        }
+
+        g_demuxThread =
+            std::thread(demuxThreadMain);
+    }
+    catch (...)
+    {
+        std::cerr
+            << "Failed to start playback threads."
+            << std::endl;
+
+        g_playbackRunning.store(false);
+        stopMediaPacketQueue(&g_audioPacketQueue);
+        stopMediaPacketQueue(&g_videoPacketQueue);
+        stopVideoFrameQueue(&g_videoFrameQueue);
+
+        if (g_demuxThread.joinable())
+            g_demuxThread.join();
+        if (g_audioDecodeThread.joinable())
+            g_audioDecodeThread.join();
+        if (g_videoDecodeThread.joinable())
+            g_videoDecodeThread.join();
+
+        return false;
+    }
+
+    return true;
+}
+
+bool decodeNextFfmpegFrame(DecodedVideoFrame* output)
+{
+    if (!output)
+        return false;
+
+    *output = {};
+
+    QueuedVideoFrame frame;
+    if (!tryPopVideoFrame(
+        &g_videoFrameQueue,
+        &frame))
+    {
+        return false;
+    }
+
+    g_displayFrame = std::move(frame);
+
+    output->data = g_displayFrame.pixels.data();
+    output->width = g_displayFrame.width;
+    output->height = g_displayFrame.height;
+    output->stride = g_displayFrame.stride;
+    output->ptsSeconds = g_displayFrame.ptsSeconds;
+    return true;
+}
+
+bool isFfmpegPlaybackFinished()
+{
+    return g_videoDecodeFinished.load() &&
+        g_audioDecodeFinished.load();
+}
+
+bool isFfmpegVideoFinished()
+{
+    return g_videoDecodeFinished.load();
 }
 
 unsigned int getFfmpegFrameIntervalMs()
@@ -667,6 +1003,29 @@ unsigned int getFfmpegFrameIntervalMs()
 
 void closeFfmpegVideo()
 {
+    g_abortRequested.store(true);
+    g_playbackRunning.store(false);
+    g_playbackPaused.store(false);
+    g_outputStarted.store(false);
+
+    stopMediaPacketQueue(&g_audioPacketQueue);
+    stopMediaPacketQueue(&g_videoPacketQueue);
+    stopVideoFrameQueue(&g_videoFrameQueue);
+
+    if (g_demuxThread.joinable())
+        g_demuxThread.join();
+    if (g_audioDecodeThread.joinable())
+        g_audioDecodeThread.join();
+    if (g_videoDecodeThread.joinable())
+        g_videoDecodeThread.join();
+
+    clearMediaPacketQueue(&g_audioPacketQueue);
+    clearMediaPacketQueue(&g_videoPacketQueue);
+    clearVideoFrameQueue(&g_videoFrameQueue);
+    g_displayFrame = {};
+    g_videoDecodeFinished.store(false);
+    g_audioDecodeFinished.store(true);
+
     if (g_audioOutput)
     {
         // 停止所有尚未播放完成的音频。
@@ -726,12 +1085,14 @@ void closeFfmpegVideo()
   g_videoPtsLogCount = 0;
 
   g_audioPtsLogCount = 0;
-  g_audioStartPtsSeconds = -1.0;
+  g_audioStartPtsSeconds.store(-1.0);
 
 }
 
 void setFfmpegAudioPaused(bool paused)
 {
+    g_playbackPaused.store(paused);
+
     if (!g_audioOutput)
         return;
     if (paused)
@@ -744,10 +1105,21 @@ void setFfmpegAudioPaused(bool paused)
     }
 }
 
+void startFfmpegPlayback()
+{
+    g_outputStarted.store(true);
+}
+
 //建立waveout实际时钟，用来观测
 double getFfmpegAudioClockSeconds()
 {
-    if(!g_audioOutput || g_audioSampleRate <= 0 || g_audioStartPtsSeconds < 0.0)
+    double startPts =
+        g_audioStartPtsSeconds.load();
+
+    if(!g_audioOutput ||
+       g_audioSampleRate <= 0 ||
+       startPts < 0.0 ||
+       g_audioDecodeFinished.load())
     {
         return -1.0;
     }
@@ -761,13 +1133,17 @@ double getFfmpegAudioClockSeconds()
     }
     if (position.wType == TIME_SAMPLES)
     {
-        return g_audioStartPtsSeconds + static_cast<double>(position.u.sample) / g_audioSampleRate;
+        return startPts +
+            static_cast<double>(position.u.sample) /
+            g_audioSampleRate;
     }
     //部分音频设备可能自己返回已经播放的字节数
     if (position.wType == TIME_BYTES)
     {
         int bytesPerSeconds = g_audioSampleRate * g_audioChannels * 2;
-        return g_audioStartPtsSeconds + static_cast<double>(position.u.cb) / bytesPerSeconds;
+        return startPts +
+            static_cast<double>(position.u.cb) /
+            bytesPerSeconds;
     }
     return -1.0;
     

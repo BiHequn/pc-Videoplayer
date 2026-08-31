@@ -3,7 +3,7 @@
 bool createPipWindow();
 bool startPipPlaybackTimer();
 void runPipWindowLoop();
-void requestPipWindowClose();
+bool requestPipWindowClose();
 
 void requestPipWindowOpacity(int opacityPercent);
 

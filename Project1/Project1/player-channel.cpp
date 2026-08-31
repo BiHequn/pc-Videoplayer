@@ -84,6 +84,11 @@ void sendReady()
   std::cout << "{\"version\":1,\"event\":\"ready\"}" << std::endl;
 }
 
+void sendEnded()
+{
+  std::cout << "{\"version\":1,\"event\":\"ended\"}" << std::endl;
+}
+
 void startCloseWatcher()
 {
   CreateThread(0, 0, StdinThread, 0, 0, 0);

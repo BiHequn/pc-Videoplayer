@@ -2,6 +2,7 @@
 #include"d3d11-renderer.h"
 #include <windows.h>
 #include"ffmpeg-decoder.h"
+#include"player-channel.h"
 #include<iostream>
 
 static HWND g_hwnd = 0;
@@ -13,6 +14,8 @@ static const UINT kSetBrightnessMessage = WM_APP + 2;
 static const UINT kSetPausedMessage = WM_APP + 3;
 
 static int g_clockLogCount = 0;
+static DecodedVideoFrame g_pendingFrame = {};
+static bool g_hasPendingFrame = false;
 
 
 //缩放时保持16:9
@@ -79,43 +82,74 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
   }
   if (msg == WM_TIMER && wParam == kPlaybackTimerId)
   {
-      DecodedVideoFrame frame = {};
-
-      if (!decodeNextFfmpegFrame(&frame))
+      while (true)
       {
-          KillTimer(hwnd, kPlaybackTimerId);
-          DestroyWindow(hwnd);
+          if (!g_hasPendingFrame)
+          {
+              if (!decodeNextFfmpegFrame(
+                  &g_pendingFrame))
+              {
+                  if (isFfmpegPlaybackFinished())
+                  {
+                      sendEnded();
+                      KillTimer(hwnd, kPlaybackTimerId);
+                      DestroyWindow(hwnd);
+                  }
+                  return 0;
+              }
+
+              g_hasPendingFrame = true;
+          }
+
+          double audioClock =
+              getFfmpegAudioClockSeconds();
+
+          if (audioClock >= 0.0 &&
+              g_pendingFrame.ptsSeconds >= 0.0)
+          {
+              double difference =
+                  g_pendingFrame.ptsSeconds -
+                  audioClock;
+
+              if (g_clockLogCount < 20)
+              {
+                  std::cerr
+                      << "Sync: video="
+                      << g_pendingFrame.ptsSeconds
+                      << ", audio="
+                      << audioClock
+                      << ", diff="
+                      << difference
+                      << " seconds"
+                      << std::endl;
+                  ++g_clockLogCount;
+              }
+
+              // 视频早了就等下一次定时器，晚太多就丢掉这一帧。
+              if (difference > 0.05)
+                  return 0;
+
+              if (difference < -0.10)
+              {
+                  g_hasPendingFrame = false;
+                  continue;
+              }
+          }
+
+          if (!showPipVideoFrame(
+              g_pendingFrame.data,
+              g_pendingFrame.width,
+              g_pendingFrame.height,
+              g_pendingFrame.stride))
+          {
+              KillTimer(hwnd, kPlaybackTimerId);
+              DestroyWindow(hwnd);
+              return 0;
+          }
+
+          g_hasPendingFrame = false;
           return 0;
       }
-
-      double audioClock = getFfmpegAudioClockSeconds();
-      if (g_clockLogCount < 20 && audioClock >= 0.0 && frame.ptsSeconds >= 0.0)
-      {
-          double difference = frame.ptsSeconds - audioClock;
-          std::cerr
-              << "Sync: video="
-              << frame.ptsSeconds
-              << ", audio="
-              << audioClock
-              << ", diff="
-              << difference
-              << " seconds"
-              << std::endl;
-          ++g_clockLogCount;
-      }
-
-      if (!showPipVideoFrame(
-          frame.data,
-          frame.width,
-          frame.height,
-          frame.stride))
-      {
-          KillTimer(hwnd, kPlaybackTimerId);
-          DestroyWindow(hwnd);
-          return 0;
-      }
-
-      return 0;
   }
   if (msg == kSetPausedMessage)
   {
@@ -175,6 +209,8 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
   if (msg == WM_DESTROY)
   {
     KillTimer(hwnd, kPlaybackTimerId);
+    g_hasPendingFrame = false;
+    g_pendingFrame = {};
     shutdownD3D11();
     g_hwnd = 0;
     PostQuitMessage(0);
@@ -253,10 +289,16 @@ void runPipWindowLoop()
   }
 }
 
-void requestPipWindowClose()
+bool requestPipWindowClose()
 {
   if (g_hwnd)
-    PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+    return PostMessage(
+        g_hwnd,
+        WM_CLOSE,
+        0,
+        0) != FALSE;
+
+  return false;
 }
 
 void requestPipWindowOpacity(int opacityPercent)

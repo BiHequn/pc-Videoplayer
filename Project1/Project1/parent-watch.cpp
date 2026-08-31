@@ -1,4 +1,5 @@
 #include "parent-watch.h"
+#include "pip-window.h"
 #include <windows.h>
 
 static DWORD WINAPI ParentWatchThread(LPVOID param)
@@ -6,11 +7,16 @@ static DWORD WINAPI ParentWatchThread(LPVOID param)
   DWORD pid = (DWORD)(ULONG_PTR)param;
   HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
   if (!h)
+  {
+    if (!requestPipWindowClose())
+      ExitProcess(0);
     return 0;
+  }
 
   WaitForSingleObject(h, INFINITE);
   CloseHandle(h);
-  ExitProcess(0);
+  if (!requestPipWindowClose())
+    ExitProcess(0);
   return 0;
 }
 

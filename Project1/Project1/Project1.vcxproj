@@ -79,9 +79,13 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
+    <OutDir>$(SolutionDir)..\bin\$(Platform)\$(Configuration)\</OutDir>
+    <TargetName>native-player</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
+    <OutDir>$(SolutionDir)..\bin\$(Platform)\$(Configuration)\</OutDir>
+    <TargetName>native-player</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -118,21 +122,16 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>C:\Users\hequnbi\workspace\native-player\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;
-dxgi.lib;d3dcompiler.lib;avformat.lib;
-avcodec.lib;
-avutil.lib;
-swscale.lib;
-swresample.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ShowProgress>LinkVerboseSAFESEH</ShowProgress>
-      <AdditionalLibraryDirectories>C:\Users\hequnbi\workspace\native-player\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -143,8 +142,9 @@ swresample.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>C:\Users\hequnbi\workspace\native-player\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
@@ -154,7 +154,7 @@ swresample.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ShowProgress>LinkVerboseSAFESEH</ShowProgress>
-      <AdditionalLibraryDirectories>C:\Users\hequnbi\workspace\native-player\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -164,9 +164,11 @@ swresample.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     <ClCompile Include="ffmpeg-decoder.cpp" />
     <ClCompile Include="ffmpeg-runtime.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="media-packet-queue.cpp" />
     <ClCompile Include="parent-watch.cpp" />
     <ClCompile Include="pip-window.cpp" />
     <ClCompile Include="player-channel.cpp" />
+    <ClCompile Include="video-frame-queue.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="app-runtime.h" />
@@ -175,9 +177,11 @@ swresample.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     <ClInclude Include="d3d11-video-texture.h" />
     <ClInclude Include="ffmpeg-decoder.h" />
     <ClInclude Include="ffmpeg-runtime.h" />
+    <ClInclude Include="media-packet-queue.h" />
     <ClInclude Include="parent-watch.h" />
     <ClInclude Include="pip-window.h" />
     <ClInclude Include="player-channel.h" />
+    <ClInclude Include="video-frame-queue.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="app-runtime.cpp">

@@ -1,5 +1,4 @@
 #pragma once
-#include<cstddef>
 
 struct DecodedVideoFrame
 {
@@ -12,14 +11,11 @@ struct DecodedVideoFrame
 
 bool openFfmpegVideo(const char* source);
 bool decodeNextFfmpegFrame(DecodedVideoFrame* output);
+bool isFfmpegVideoFinished();
+bool isFfmpegPlaybackFinished();
 void closeFfmpegVideo();
+
 unsigned int getFfmpegFrameIntervalMs();
-
-//音频解码结果统一转成S16交错PCM
-int getFfmpegAudioSampleRate();
-int getFfmpegAudioChannels();
-size_t getFfmpegAudioPcmBytes();
-
+void startFfmpegPlayback();
 void setFfmpegAudioPaused(bool paused);
-
 double getFfmpegAudioClockSeconds();
