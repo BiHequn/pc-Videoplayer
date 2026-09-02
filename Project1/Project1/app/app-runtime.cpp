@@ -1,13 +1,13 @@
 #include "app-runtime.h"
-#include "parent-watch.h"
-#include "player-channel.h"
-#include "pip-window.h"
+#include "media/ffmpeg-decoder.h"
+#include "media/ffmpeg-runtime.h"
+#include "platform/parent-watch.h"
+#include "platform/pip-window.h"
+#include "platform/player-channel.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
-#include"ffmpeg-runtime.h"
-#include"ffmpeg-decoder.h"
 
 #include<commdlg.h>
 #include<string>

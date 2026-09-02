@@ -1,7 +1,8 @@
 #include "pip-window.h"
-#include"d3d11-renderer.h"
+#include "media/ffmpeg-decoder.h"
+#include "render/d3d11-renderer.h"
+
 #include <windows.h>
-#include"ffmpeg-decoder.h"
 #include"player-channel.h"
 #include<iostream>
 #include<windowsx.h>

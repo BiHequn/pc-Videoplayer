@@ -122,7 +122,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(SolutionDir)..\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -144,7 +144,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(SolutionDir)..\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
@@ -158,35 +158,31 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="d3d11-renderer.cpp" />
-    <ClCompile Include="d3d11-shader.cpp" />
-    <ClCompile Include="d3d11-video-texture.cpp" />
-    <ClCompile Include="ffmpeg-decoder.cpp" />
-    <ClCompile Include="ffmpeg-runtime.cpp" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="media-packet-queue.cpp" />
-    <ClCompile Include="parent-watch.cpp" />
-    <ClCompile Include="pip-window.cpp" />
-    <ClCompile Include="player-channel.cpp" />
-    <ClCompile Include="video-frame-queue.cpp" />
+    <ClCompile Include="app\app-runtime.cpp" />
+    <ClCompile Include="app\main.cpp" />
+    <ClCompile Include="media\ffmpeg-decoder.cpp" />
+    <ClCompile Include="media\ffmpeg-runtime.cpp" />
+    <ClCompile Include="media\media-packet-queue.cpp" />
+    <ClCompile Include="media\video-frame-queue.cpp" />
+    <ClCompile Include="platform\parent-watch.cpp" />
+    <ClCompile Include="platform\pip-window.cpp" />
+    <ClCompile Include="platform\player-channel.cpp" />
+    <ClCompile Include="render\d3d11-renderer.cpp" />
+    <ClCompile Include="render\d3d11-shader.cpp" />
+    <ClCompile Include="render\d3d11-video-texture.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="app-runtime.h" />
-    <ClInclude Include="d3d11-renderer.h" />
-    <ClInclude Include="d3d11-shader.h" />
-    <ClInclude Include="d3d11-video-texture.h" />
-    <ClInclude Include="ffmpeg-decoder.h" />
-    <ClInclude Include="ffmpeg-runtime.h" />
-    <ClInclude Include="media-packet-queue.h" />
-    <ClInclude Include="parent-watch.h" />
-    <ClInclude Include="pip-window.h" />
-    <ClInclude Include="player-channel.h" />
-    <ClInclude Include="video-frame-queue.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="app-runtime.cpp">
-      <FileType>Document</FileType>
-    </ClCompile>
+    <ClInclude Include="app\app-runtime.h" />
+    <ClInclude Include="media\ffmpeg-decoder.h" />
+    <ClInclude Include="media\ffmpeg-runtime.h" />
+    <ClInclude Include="media\media-packet-queue.h" />
+    <ClInclude Include="media\video-frame-queue.h" />
+    <ClInclude Include="platform\parent-watch.h" />
+    <ClInclude Include="platform\pip-window.h" />
+    <ClInclude Include="platform\player-channel.h" />
+    <ClInclude Include="render\d3d11-renderer.h" />
+    <ClInclude Include="render\d3d11-shader.h" />
+    <ClInclude Include="render\d3d11-video-texture.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -15,11 +15,11 @@ bool pushVideoFrame(VideoFrameQueue* queue, const unsigned char* data, int width
 	frame.ptsSeconds = ptsSeconds;
 
 	const size_t dataSize = static_cast<size_t>(stride) * static_cast<size_t>(height);
-	//必须复制BGRA数据，原始数据指向解码器复用的g_bgraBuffer，下一帧解码时会被覆盖
+	//蹇呴』澶嶅埗BGRA鏁版嵁锛屽師濮嬫暟鎹寚鍚戣В鐮佸櫒澶嶇敤鐨刧_bgraBuffer锛屼笅涓�甯цВ鐮佹椂浼氳瑕嗙洊
 	frame.pixels.assign(data, data + dataSize);
 	std::unique_lock<std::mutex> lock(queue->mutex);
 
-	//队列已满时让视频解码线程等待窗口线程消费
+	//闃熷垪宸叉弧鏃惰瑙嗛瑙ｇ爜绾跨▼绛夊緟绐楀彛绾跨▼娑堣垂
 	queue->condition.wait(lock, [queue, maxFrameCount]()
 		{
 			return queue->stopped || queue->frames.size() < maxFrameCount;
@@ -41,7 +41,7 @@ bool tryPopVideoFrame(VideoFrameQueue* queue, QueuedVideoFrame* output)
 		return false;
 	}
 	std::unique_lock<std::mutex> lock(queue->mutex);
-	//窗口定时器不能阻塞，没有帧时直接返回
+	//绐楀彛瀹氭椂鍣ㄤ笉鑳介樆濉烇紝娌℃湁甯ф椂鐩存帴杩斿洖
 		if (queue->frames.empty())
 		{
 			return false;

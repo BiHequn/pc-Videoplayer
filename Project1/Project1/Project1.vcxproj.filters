@@ -1,90 +1,90 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="源文件">
-      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    <Filter Include="app">
+      <UniqueIdentifier>{819FD9A8-BFF2-4C67-927A-FB20146EA165}</UniqueIdentifier>
     </Filter>
-    <Filter Include="头文件">
-      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    <Filter Include="media">
+      <UniqueIdentifier>{B9D8359F-767E-46C0-8E3D-B1B97798CA50}</UniqueIdentifier>
     </Filter>
-    <Filter Include="资源文件">
-      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
-      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    <Filter Include="platform">
+      <UniqueIdentifier>{21790410-1E8F-4DE9-B530-FEA22BCDD655}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="render">
+      <UniqueIdentifier>{2C785ECB-BF80-42F7-B99A-25439DB1D4C0}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="app\app-runtime.cpp">
+      <Filter>app</Filter>
     </ClCompile>
-    <ClCompile Include="pip-window.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="app\main.cpp">
+      <Filter>app</Filter>
     </ClCompile>
-    <ClCompile Include="parent-watch.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="media\ffmpeg-decoder.cpp">
+      <Filter>media</Filter>
     </ClCompile>
-    <ClCompile Include="player-channel.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="media\ffmpeg-runtime.cpp">
+      <Filter>media</Filter>
     </ClCompile>
-    <ClCompile Include="app-runtime.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="media\media-packet-queue.cpp">
+      <Filter>media</Filter>
     </ClCompile>
-    <ClCompile Include="d3d11-renderer.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="media\video-frame-queue.cpp">
+      <Filter>media</Filter>
     </ClCompile>
-    <ClCompile Include="d3d11-shader.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="platform\parent-watch.cpp">
+      <Filter>platform</Filter>
     </ClCompile>
-    <ClCompile Include="ffmpeg-runtime.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="platform\pip-window.cpp">
+      <Filter>platform</Filter>
     </ClCompile>
-    <ClCompile Include="ffmpeg-decoder.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="platform\player-channel.cpp">
+      <Filter>platform</Filter>
     </ClCompile>
-    <ClCompile Include="d3d11-video-texture.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="render\d3d11-renderer.cpp">
+      <Filter>render</Filter>
     </ClCompile>
-    <ClCompile Include="media-packet-queue.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="render\d3d11-shader.cpp">
+      <Filter>render</Filter>
     </ClCompile>
-    <ClCompile Include="video-frame-queue.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="render\d3d11-video-texture.cpp">
+      <Filter>render</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="pip-window.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="app\app-runtime.h">
+      <Filter>app</Filter>
     </ClInclude>
-    <ClInclude Include="parent-watch.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="media\ffmpeg-decoder.h">
+      <Filter>media</Filter>
     </ClInclude>
-    <ClInclude Include="player-channel.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="media\ffmpeg-runtime.h">
+      <Filter>media</Filter>
     </ClInclude>
-    <ClInclude Include="app-runtime.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="media\media-packet-queue.h">
+      <Filter>media</Filter>
     </ClInclude>
-    <ClInclude Include="d3d11-renderer.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="media\video-frame-queue.h">
+      <Filter>media</Filter>
     </ClInclude>
-    <ClInclude Include="d3d11-shader.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="platform\parent-watch.h">
+      <Filter>platform</Filter>
     </ClInclude>
-    <ClInclude Include="ffmpeg-runtime.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="platform\pip-window.h">
+      <Filter>platform</Filter>
     </ClInclude>
-    <ClInclude Include="ffmpeg-decoder.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="platform\player-channel.h">
+      <Filter>platform</Filter>
     </ClInclude>
-    <ClInclude Include="d3d11-video-texture.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="render\d3d11-renderer.h">
+      <Filter>render</Filter>
     </ClInclude>
-    <ClInclude Include="media-packet-queue.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="render\d3d11-shader.h">
+      <Filter>render</Filter>
     </ClInclude>
-    <ClInclude Include="video-frame-queue.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="render\d3d11-video-texture.h">
+      <Filter>render</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
