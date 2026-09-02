@@ -4,6 +4,7 @@
 #include"ffmpeg-decoder.h"
 #include"player-channel.h"
 #include<iostream>
+#include<windowsx.h>
 
 static HWND g_hwnd = 0;
 //临时按约30帧播放，1000/30约等于33毫秒
@@ -16,6 +17,7 @@ static const UINT kSetPausedMessage = WM_APP + 3;
 static int g_clockLogCount = 0;
 static DecodedVideoFrame g_pendingFrame = {};
 static bool g_hasPendingFrame = false;
+
 
 
 //缩放时保持16:9
@@ -52,12 +54,38 @@ static void keep16By9AspectRatio(WPARAM edge, RECT* rect)
 
 LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//窗口表示，消息类型，参数1，参数2
 {
+  if (msg == WM_NCCALCSIZE)
+  {
+      // 让客户区覆盖整个窗口，隐藏系统边框。
+      return 0;
+  }
+
   if (msg == WM_NCHITTEST)
   {
-    LRESULT hit = DefWindowProc(hwnd, msg, wParam, lParam);
-    if (hit == HTCLIENT)
-      return HTCAPTION; // 中间区域用来拖窗口
-    return hit;
+      RECT rect = {};
+      GetWindowRect(hwnd, &rect);
+
+      const int x = GET_X_LPARAM(lParam);
+      const int y = GET_Y_LPARAM(lParam);
+      const int border = 8;
+
+      const bool left = x < rect.left + border;
+      const bool right = x >= rect.right - border;
+      const bool top = y < rect.top + border;
+      const bool bottom = y >= rect.bottom - border;
+
+      if (top && left) return HTTOPLEFT;
+      if (top && right) return HTTOPRIGHT;
+      if (bottom && left) return HTBOTTOMLEFT;
+      if (bottom && right) return HTBOTTOMRIGHT;
+
+      if (left) return HTLEFT;
+      if (right) return HTRIGHT;
+      if (top) return HTTOP;
+      if (bottom) return HTBOTTOM;
+
+      // 中间区域用于拖动窗口。
+      return HTCAPTION;
   }
 
   //把D3D11窗口接在PiP窗口
