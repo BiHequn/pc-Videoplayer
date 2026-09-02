@@ -259,6 +259,12 @@ bool createPipWindow()
     return false;
   }
   ShowWindow(g_hwnd, SW_SHOW);
+  SetWindowPos(
+      g_hwnd,
+      HWND_TOPMOST,
+      0, 0, 0, 0,
+      SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  UpdateWindow(g_hwnd);
   renderD3D11();
   return true;
 }

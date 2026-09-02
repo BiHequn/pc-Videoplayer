@@ -9,6 +9,9 @@
 #include"ffmpeg-runtime.h"
 #include"ffmpeg-decoder.h"
 
+#include<commdlg.h>
+#include<string>
+
 //参数解析
 static DWORD parseParentPid(int argc, char* argv[])
 {
@@ -31,16 +34,63 @@ static const char* parseSource(int argc, char* argv[])
   return nullptr;
 }
 
+//文件选择函数
+static std::string wideToUtf8(const wchar_t* text)
+{
+    int size = WideCharToMultiByte(
+        CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+
+    if (size <= 1)
+        return {};
+
+    std::string result(size, '\0');
+
+    WideCharToMultiByte(
+        CP_UTF8, 0, text, -1,
+        result.data(), size, nullptr, nullptr);
+
+    result.pop_back();
+    return result;
+}
+
+static std::string selectVideoFile()
+{
+    wchar_t filePath[32768] = {};
+
+    OPENFILENAMEW dialog = {};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrFile = filePath;
+    dialog.nMaxFile = static_cast<DWORD>(std::size(filePath));
+    dialog.lpstrFilter =
+        L"视频文件\0*.mp4;*.flv;*.m3u8;*.mkv;*.avi;*.mov;*.webm\0"
+        L"所有文件\0*.*\0";
+    dialog.nFilterIndex = 1;
+    dialog.Flags =
+        OFN_EXPLORER |
+        OFN_FILEMUSTEXIST |
+        OFN_PATHMUSTEXIST;
+
+    if (!GetOpenFileNameW(&dialog))
+        return {};
+
+    return wideToUtf8(filePath);
+}
+
 int runNativePlayer(int argc, char* argv[])
 {
-  const char* source = parseSource(argc, argv);
-  if (!source || source[0] == '\0')
-  {
-    fprintf(stderr,
-      "Usage: native-player.exe --source <file-or-url> "
-      "[--parent-pid <pid>]\n");
-    return 1;
-  }
+    std::string selectedSource;
+    const char* source = parseSource(argc, argv);
+
+    if (!source || source[0] == '\0')
+    {
+        selectedSource = selectVideoFile();
+
+        // 用户取消选择，正常退出
+        if (selectedSource.empty())
+            return 0;
+
+        source = selectedSource.c_str();
+    }
 
   startParentWatch(parseParentPid(argc, argv));
 
