@@ -15,14 +15,14 @@ extern "C"
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
-#include<libswscale/swscale.h>
+
 #include<libswresample/swresample.h>
 }
 
 
 
 static AVFormatContext* g_formatContext = nullptr;
-static AVCodecContext* g_codecContext = nullptr;
+
 static int g_videoStreamIndex = -1;
 
 static AVCodecContext* g_audioCodecContext = nullptr;
@@ -34,8 +34,8 @@ static int g_audioSampleRate = 0;
 static int g_audioChannels = 0;
 static bool g_audioPcmLogged = false;
 
-static SwsContext* g_scaleContext = nullptr;
-static std::vector<unsigned char>g_bgraBuffer;
+
+
 static unsigned int g_frameIntervalMs = 33;
 //pts
 static int g_videoPtsLogCount = 0;
@@ -76,6 +76,8 @@ static void audioDecodeThreadMain();
 static void videoDecodeThreadMain();
 static bool startPlaybackThreads();
 
+static std::unique_ptr<IVideoDecoder> g_videoDecoder;
+
 static void printFfmpegError(const char* operation, int errorCode)
 {
   char errorText[AV_ERROR_MAX_STRING_SIZE] = {};
@@ -91,6 +93,21 @@ static void printFfmpegError(const char* operation, int errorCode)
 static int ffmpegInterruptCallback(void*)
 {
     return g_abortRequested.load() ? 1 : 0;
+}
+//编码格式转换
+static VideoCodec toVideoCodec(AVCodecID codecId)
+{
+    switch (codecId)
+    {
+        case AV_CODEC_ID_H264:
+        return VideoCodec::H264;
+
+        case AV_CODEC_ID_HEVC:
+            return VideoCodec::Hevc;
+
+        default:
+            return VideoCodec::Unknown;
+    }
 }
 
 static void demuxThreadMain()
@@ -164,15 +181,19 @@ static void demuxThreadMain()
     finishMediaPacketQueue(&g_videoPacketQueue);
 }
 
-bool openFfmpegVideo(const char* source)
+bool openFfmpegVideo(
+    const char* source,
+    std::unique_ptr<IVideoDecoder> videoDecoder,
+    VideoDecoderBackend backend)
 {
-  if (!source || source[0] == '\0')
+  if (!source || source[0] == '\0' || !videoDecoder)
   {
-    std::cerr << "Video source is missing." << std::endl;
+    std::cerr << "Video source or decoder is missing." << std::endl;
     return false;
   }
 
   closeFfmpegVideo();
+  g_videoDecoder = std::move(videoDecoder);
   g_abortRequested.store(false);
 
   g_formatContext = avformat_alloc_context();
@@ -181,6 +202,7 @@ bool openFfmpegVideo(const char* source)
       std::cerr
           << "avformat_alloc_context failed."
           << std::endl;
+      closeFfmpegVideo();
       return false;
   }
 
@@ -214,15 +236,13 @@ bool openFfmpegVideo(const char* source)
     return false;
   }
 
-  const AVCodec* decoder = nullptr;
-
   // 找到最合适的视频流以及对应解码器。
   result = av_find_best_stream(
-    g_formatContext,
-    AVMEDIA_TYPE_VIDEO,
-    -1,
-    -1,
-    &decoder,
+      g_formatContext,
+      AVMEDIA_TYPE_VIDEO,
+      -1,
+      -1,
+      nullptr,
     0);
 
   if (result < 0)
@@ -233,17 +253,79 @@ bool openFfmpegVideo(const char* source)
   }
 
   g_videoStreamIndex = result;
-  g_codecContext = avcodec_alloc_context3(decoder);
-
-  if (!g_codecContext)
-  {
-    std::cerr << "avcodec_alloc_context3 failed." << std::endl;
-    closeFfmpegVideo();
-    return false;
-  }
+  
 
   AVStream* videoStream =
     g_formatContext->streams[g_videoStreamIndex];
+
+  AVCodecParameters* codecParameters =
+      videoStream->codecpar;
+
+  VideoDecoderConfig decoderConfig;
+  decoderConfig.codec =
+      toVideoCodec(codecParameters->codec_id);
+  decoderConfig.width = codecParameters->width;
+  decoderConfig.height = codecParameters->height;
+  decoderConfig.timeBase.numerator =
+      videoStream->time_base.num;
+  decoderConfig.timeBase.denominator =
+      videoStream->time_base.den;
+
+  if (codecParameters->extradata &&
+      codecParameters->extradata_size > 0)
+  {
+      decoderConfig.extraData.assign(
+          codecParameters->extradata,
+          codecParameters->extradata +
+          codecParameters->extradata_size);
+  }
+
+  if (!g_videoDecoder->initialize(decoderConfig))
+  {
+      if (backend != VideoDecoderBackend::Auto)
+      {
+          std::cerr
+              << "Requested decoder initialization failed."
+              << std::endl;
+
+          closeFfmpegVideo();
+          return false;
+      }
+
+      std::cerr
+          << "MF initialization failed, "
+          "fallback to FFmpeg."
+          << std::endl;
+
+      g_videoDecoder.reset();
+
+      g_videoDecoder =
+          createVideoDecoder(
+              VideoDecoderBackend::Ffmpeg);
+
+      if (!g_videoDecoder ||
+          !g_videoDecoder->initialize(decoderConfig))
+      {
+          std::cerr
+              << "FFmpeg fallback initialization failed."
+              << std::endl;
+
+          closeFfmpegVideo();
+          return false;
+      }
+
+      std::cerr
+          << "Using FFmpeg software decoder fallback."
+          << std::endl;
+  }
+
+  std::cerr
+      << "Video decoder interface initialized: "
+      << decoderConfig.width
+      << "x"
+      << decoderConfig.height
+      << std::endl;
+
   //根据视频流帧率计算每帧间隔
   AVRational frameRate = av_guess_frame_rate(
       g_formatContext,
@@ -264,28 +346,7 @@ bool openFfmpegVideo(const char* source)
 
   }
 
-  result = avcodec_parameters_to_context(
-    g_codecContext,
-    videoStream->codecpar);
 
-  if (result < 0)
-  {
-    printFfmpegError("avcodec_parameters_to_context", result);
-    closeFfmpegVideo();
-    return false;
-  }
-
-  result = avcodec_open2(
-    g_codecContext,
-    decoder,
-    nullptr);
-
-  if (result < 0)
-  {
-    printFfmpegError("avcodec_open2", result);
-    closeFfmpegVideo();
-    return false;
-  }
   //音频解码
   const AVCodec* audioDecoder = nullptr;
 
@@ -422,15 +483,15 @@ bool openFfmpegVideo(const char* source)
       g_audioStreamIndex = -1;
       std::cerr << "No audio stream found." << std::endl;
   }
-
   std::cerr
-    << "Opened video: "
-    << decoder->name
-    << ", "
-    << g_codecContext->width
-    << "x"
-    << g_codecContext->height
-    << std::endl;
+      << "Opened video stream: "
+      << avcodec_get_name(
+          codecParameters->codec_id)
+      << ", "
+      << codecParameters->width
+      << "x"
+      << codecParameters->height
+      << std::endl;
 
   if (!startPlaybackThreads())
   {
@@ -441,79 +502,6 @@ bool openFfmpegVideo(const char* source)
   return true;
 }
 
-
-
-static bool convertFrameToBgra(const AVFrame* frame,DecodedVideoFrame* output)
-{
-  if (!frame || !output ||
-    frame->width <= 0 || frame->height <= 0)
-  {
-    return false;
-  }
-
-  // 创建或复用 YUV 到 BGRA 的颜色转换器。
-  g_scaleContext = sws_getCachedContext(
-    g_scaleContext,
-    frame->width,
-    frame->height,
-    static_cast<AVPixelFormat>(frame->format),
-    frame->width,
-    frame->height,
-    AV_PIX_FMT_BGRA,
-    SWS_BILINEAR,
-    nullptr,
-    nullptr,
-    nullptr);
-
-  if (!g_scaleContext)
-  {
-    std::cerr << "sws_getCachedContext failed." << std::endl;
-    return false;
-  }
-
-  const int stride = frame->width * 4;
-  const size_t bufferSize =
-    static_cast<size_t>(stride) * frame->height;
-
-  g_bgraBuffer.resize(bufferSize);
-
-  unsigned char* destinationData[4] = {
-      g_bgraBuffer.data(),
-      nullptr,
-      nullptr,
-      nullptr
-  };
-
-  int destinationStride[4] = {
-      stride,
-      0,
-      0,
-      0
-  };
-
-  // 将解码器输出的 YUV 帧转换成连续 BGRA 像素。
-  int convertedHeight = sws_scale(
-    g_scaleContext,
-    frame->data,
-    frame->linesize,
-    0,
-    frame->height,
-    destinationData,
-    destinationStride);
-
-  if (convertedHeight != frame->height)
-  {
-    std::cerr << "sws_scale failed." << std::endl;
-    return false;
-  }
-
-  output->data = g_bgraBuffer.data();
-  output->width = frame->width;
-  output->height = frame->height;
-  output->stride = stride;
-
-  return true;
-}
 
 //音频辅助函数
 static void decodeAudioPacket(const AVPacket* packet, AVFrame* frame)
@@ -769,109 +757,162 @@ static void audioDecodeThreadMain()
     g_audioDecodeFinished.store(true);
 }
 
-// 把一帧复制进队列，窗口线程拿到的是独立的 BGRA 数据。
-static bool pushDecodedVideoFrame(AVFrame* frame)
+//interface版本
+static bool pushInterfaceVideoFrame(const DecodedVideoFrame& frame)
 {
-    DecodedVideoFrame output = {};
-
-    if (!convertFrameToBgra(frame, &output))
+    if (!frame.data ||
+        frame.width <= 0 ||
+        frame.height <= 0 ||
+        frame.stride <= 0)
     {
-        av_frame_unref(frame);
         return false;
-    }
-
-    if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
-    {
-        AVStream* videoStream =
-            g_formatContext->streams[g_videoStreamIndex];
-
-        output.ptsSeconds =
-            frame->best_effort_timestamp *
-            av_q2d(videoStream->time_base);
-    }
-    else
-    {
-        output.ptsSeconds = -1.0;
     }
 
     if (g_videoPtsLogCount < 10)
     {
         std::cerr
             << "Video PTS: "
-            << output.ptsSeconds
+            << frame.ptsSeconds
             << " seconds"
             << std::endl;
 
         ++g_videoPtsLogCount;
     }
 
-    bool pushed = pushVideoFrame(
+    return pushVideoFrame(
         &g_videoFrameQueue,
-        output.data,
-        output.width,
-        output.height,
-        output.stride,
-        output.ptsSeconds,
+        frame.data,
+        frame.width,
+        frame.height,
+        frame.stride,
+        frame.ptsSeconds,
         kVideoFrameQueueSize);
-
-    av_frame_unref(frame);
-    return pushed;
 }
 
-static bool decodeVideoPacket(
-    const AVPacket* packet,
-    AVFrame* frame)
+static bool receiveDecodedVideoFrames()
 {
-    int result = avcodec_send_packet(
-        g_codecContext,
-        packet);
-
-    if (result < 0 && result != AVERROR_EOF)
-    {
-        printFfmpegError("avcodec_send_packet", result);
+    if (!g_videoDecoder)
         return false;
-    }
-
     while (g_playbackRunning.load())
     {
-        result = avcodec_receive_frame(
-            g_codecContext,
-            frame);
-
-        if (result == AVERROR(EAGAIN) ||
-            result == AVERROR_EOF)
+        DecodedVideoFrame frame = {};
+        VideoDecoderResult result =
+            g_videoDecoder->receiveFrame(&frame);
+        if (result ==
+            VideoDecoderResult::FrameReady)
+        {
+            if (!pushInterfaceVideoFrame(frame))
+                return false;
+            continue;
+        }
+        if (result ==
+            VideoDecoderResult::TryAgain ||
+            result ==
+            VideoDecoderResult::EndOfStream ||
+            result ==
+            VideoDecoderResult::Ok)
         {
             return true;
         }
+        std::cerr
+            << "Video decoder receiveFrame failed."
+            << std::endl;
+        return false;
+    }
+    // 外部要求停止播放，不视为解码错误。
+    return true;
+}
 
-        if (result < 0)
-        {
-            printFfmpegError(
-                "avcodec_receive_frame",
-                result);
-            return false;
-        }
+static bool decodeVideoPacket(const AVPacket* packet)
+{
+    if (!g_videoDecoder)
+        return false;
 
-        if (!pushDecodedVideoFrame(frame))
+    EncodedVideoPacket encodedPacket = {};
+
+    if (packet)
+    {
+        if (!packet->data || packet->size <= 0)
             return false;
+
+        encodedPacket.data = packet->data;
+        encodedPacket.size =
+            static_cast<std::size_t>(
+                packet->size);
+
+        encodedPacket.pts = packet->pts;
+        encodedPacket.dts = packet->dts;
+        encodedPacket.duration =
+            packet->duration;
+
+        encodedPacket.hasPts =
+            packet->pts != AV_NOPTS_VALUE;
+
+        encodedPacket.hasDts =
+            packet->dts != AV_NOPTS_VALUE;
+
+        encodedPacket.keyFrame =
+            (packet->flags &
+                AV_PKT_FLAG_KEY) != 0;
     }
 
-    return false;
+    VideoDecoderResult result =
+        VideoDecoderResult::TryAgain;
+
+    // MFT may remain busy across output renegotiation or an HLS
+    // segment boundary. Drain pending frames and retry the same packet.
+    constexpr int kMaximumSendAttempts = 16;
+
+    for (int attempt = 0;
+         attempt < kMaximumSendAttempts;
+         ++attempt)
+    {
+        result =
+            packet
+            ? g_videoDecoder->sendPacket(
+                encodedPacket)
+            : g_videoDecoder->drain();
+
+        if (result != VideoDecoderResult::TryAgain)
+            break;
+
+        if (!receiveDecodedVideoFrames())
+            return false;
+
+        if (!g_playbackRunning.load())
+            return true;
+    }
+
+    if (result == VideoDecoderResult::Error ||
+        result == VideoDecoderResult::TryAgain)
+    {
+        std::cerr
+            << "Video decoder sendPacket failed."
+            << std::endl;
+
+        return false;
+    }
+
+    return receiveDecodedVideoFrames();
+}
+
+static void stopPlaybackAfterVideoError()
+{
+    g_abortRequested.store(true);
+    g_playbackRunning.store(false);
+
+    stopMediaPacketQueue(
+        &g_audioPacketQueue);
+
+    stopMediaPacketQueue(
+        &g_videoPacketQueue);
+
+    stopVideoFrameQueue(
+        &g_videoFrameQueue);
 }
 
 static void videoDecodeThreadMain()
 {
-    AVFrame* frame = av_frame_alloc();
-    if (!frame)
-    {
-        std::cerr
-            << "av_frame_alloc for video failed."
-            << std::endl;
-        g_videoDecodeFinished.store(true);
-        finishVideoFrameQueue(&g_videoFrameQueue);
-        return;
-    }
-
     while (g_playbackRunning.load())
     {
         if (g_playbackPaused.load())
@@ -881,33 +922,39 @@ static void videoDecodeThreadMain()
         }
 
         AVPacket* packet =
-            popMediaPacket(&g_videoPacketQueue);
+            popMediaPacket(
+                &g_videoPacketQueue);
 
         if (!packet)
         {
-            if (g_playbackRunning.load())
-                decodeVideoPacket(nullptr, frame);
+            // 队列正常结束时，取出解码器中的尾帧。
+            if (g_playbackRunning.load() &&
+                !decodeVideoPacket(nullptr))
+            {
+                stopPlaybackAfterVideoError();
+            }
+
             break;
         }
 
-        bool decoded = decodeVideoPacket(packet, frame);
+        bool decoded =
+            decodeVideoPacket(packet);
+
         av_packet_free(&packet);
 
         if (!decoded)
         {
-            g_abortRequested.store(true);
-            g_playbackRunning.store(false);
-            stopMediaPacketQueue(&g_audioPacketQueue);
-            stopMediaPacketQueue(&g_videoPacketQueue);
-            stopVideoFrameQueue(&g_videoFrameQueue);
+            stopPlaybackAfterVideoError();
             break;
         }
     }
 
-    av_frame_free(&frame);
-    finishVideoFrameQueue(&g_videoFrameQueue);
+    finishVideoFrameQueue(
+        &g_videoFrameQueue);
+
     g_videoDecodeFinished.store(true);
 }
+
 
 static bool startPlaybackThreads()
 {
@@ -1052,19 +1099,11 @@ void closeFfmpegVideo()
 
     g_nextAudioBuffer = 0;
 
-  if (g_scaleContext)
-  {
-    sws_freeContext(g_scaleContext);
-    g_scaleContext = nullptr;
-  }
-  g_bgraBuffer.clear();
-
   if (g_audioCodecContext)
       avcodec_free_context(&g_audioCodecContext);
 
-  // 解码器依赖媒体输入，因此先释放解码器。
-  if (g_codecContext)
-    avcodec_free_context(&g_codecContext);
+  // unique_ptr 析构具体解码器，具体实现负责释放其内部资源。
+  g_videoDecoder.reset();
 
   if (g_formatContext)
     avformat_close_input(&g_formatContext);

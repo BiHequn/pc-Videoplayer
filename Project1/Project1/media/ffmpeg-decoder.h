@@ -1,15 +1,10 @@
 #pragma once
+#include"video-decoder.h"
+#include"video-decoder-factory.h"
 
-struct DecodedVideoFrame
-{
-  const unsigned char* data;
-  int width;
-  int height;
-  int stride;
-  double ptsSeconds;
-};
+#include<memory>
 
-bool openFfmpegVideo(const char* source);
+bool openFfmpegVideo(const char* source,std::unique_ptr<IVideoDecoder> videoDecoder,VideoDecoderBackend backend);
 bool decodeNextFfmpegFrame(DecodedVideoFrame* output);
 bool isFfmpegVideoFinished();
 bool isFfmpegPlaybackFinished();

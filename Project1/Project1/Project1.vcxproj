@@ -119,7 +119,9 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;
+_CONSOLE;
+;NP_ENABLE_FFMPEG_VIDEO_DECODER=1;NP_ENABLE_MF_VIDEO_DECODER=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir);$(SolutionDir)..\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
@@ -129,7 +131,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winmm.lib;mfplat.lib;mf.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ShowProgress>LinkVerboseSAFESEH</ShowProgress>
       <AdditionalLibraryDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
@@ -140,7 +142,9 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;
+_CONSOLE;
+;NP_ENABLE_FFMPEG_VIDEO_DECODER=1;NP_ENABLE_MF_VIDEO_DECODER=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
@@ -152,7 +156,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winmm.lib;mfplat.lib;mf.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ShowProgress>LinkVerboseSAFESEH</ShowProgress>
       <AdditionalLibraryDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
@@ -162,7 +166,10 @@
     <ClCompile Include="app\main.cpp" />
     <ClCompile Include="media\ffmpeg-decoder.cpp" />
     <ClCompile Include="media\ffmpeg-runtime.cpp" />
+    <ClCompile Include="media\ffmpeg-video-decoder.cpp" />
     <ClCompile Include="media\media-packet-queue.cpp" />
+    <ClCompile Include="media\mf-video-decoder.cpp" />
+    <ClCompile Include="media\video-decoder-factory.cpp" />
     <ClCompile Include="media\video-frame-queue.cpp" />
     <ClCompile Include="platform\parent-watch.cpp" />
     <ClCompile Include="platform\pip-window.cpp" />
@@ -175,7 +182,11 @@
     <ClInclude Include="app\app-runtime.h" />
     <ClInclude Include="media\ffmpeg-decoder.h" />
     <ClInclude Include="media\ffmpeg-runtime.h" />
+    <ClInclude Include="media\ffmpeg-video-decoder.h" />
     <ClInclude Include="media\media-packet-queue.h" />
+    <ClInclude Include="media\mf-video-decoder.h" />
+    <ClInclude Include="media\video-decoder-factory.h" />
+    <ClInclude Include="media\video-decoder.h" />
     <ClInclude Include="media\video-frame-queue.h" />
     <ClInclude Include="platform\parent-watch.h" />
     <ClInclude Include="platform\pip-window.h" />

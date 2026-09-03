@@ -6,6 +6,7 @@
     </Filter>
     <Filter Include="media">
       <UniqueIdentifier>{B9D8359F-767E-46C0-8E3D-B1B97798CA50}</UniqueIdentifier>
+      <SourceControlFiles>False</SourceControlFiles>
     </Filter>
     <Filter Include="platform">
       <UniqueIdentifier>{21790410-1E8F-4DE9-B530-FEA22BCDD655}</UniqueIdentifier>
@@ -20,18 +21,6 @@
     </ClCompile>
     <ClCompile Include="app\main.cpp">
       <Filter>app</Filter>
-    </ClCompile>
-    <ClCompile Include="media\ffmpeg-decoder.cpp">
-      <Filter>media</Filter>
-    </ClCompile>
-    <ClCompile Include="media\ffmpeg-runtime.cpp">
-      <Filter>media</Filter>
-    </ClCompile>
-    <ClCompile Include="media\media-packet-queue.cpp">
-      <Filter>media</Filter>
-    </ClCompile>
-    <ClCompile Include="media\video-frame-queue.cpp">
-      <Filter>media</Filter>
     </ClCompile>
     <ClCompile Include="platform\parent-watch.cpp">
       <Filter>platform</Filter>
@@ -51,22 +40,31 @@
     <ClCompile Include="render\d3d11-video-texture.cpp">
       <Filter>render</Filter>
     </ClCompile>
+    <ClCompile Include="media\ffmpeg-decoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\ffmpeg-runtime.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media-packet-queue.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video-frame-queue.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\ffmpeg-video-decoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video-decoder-factory.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\mf-video-decoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="app\app-runtime.h">
       <Filter>app</Filter>
-    </ClInclude>
-    <ClInclude Include="media\ffmpeg-decoder.h">
-      <Filter>media</Filter>
-    </ClInclude>
-    <ClInclude Include="media\ffmpeg-runtime.h">
-      <Filter>media</Filter>
-    </ClInclude>
-    <ClInclude Include="media\media-packet-queue.h">
-      <Filter>media</Filter>
-    </ClInclude>
-    <ClInclude Include="media\video-frame-queue.h">
-      <Filter>media</Filter>
     </ClInclude>
     <ClInclude Include="platform\parent-watch.h">
       <Filter>platform</Filter>
@@ -85,6 +83,30 @@
     </ClInclude>
     <ClInclude Include="render\d3d11-video-texture.h">
       <Filter>render</Filter>
+    </ClInclude>
+    <ClInclude Include="media\ffmpeg-decoder.h">
+      <Filter>media</Filter>
+    </ClInclude>
+    <ClInclude Include="media\ffmpeg-runtime.h">
+      <Filter>media</Filter>
+    </ClInclude>
+    <ClInclude Include="media\media-packet-queue.h">
+      <Filter>media</Filter>
+    </ClInclude>
+    <ClInclude Include="media\video-frame-queue.h">
+      <Filter>media</Filter>
+    </ClInclude>
+    <ClInclude Include="media\video-decoder.h">
+      <Filter>media</Filter>
+    </ClInclude>
+    <ClInclude Include="media\ffmpeg-video-decoder.h">
+      <Filter>media</Filter>
+    </ClInclude>
+    <ClInclude Include="media\video-decoder-factory.h">
+      <Filter>media</Filter>
+    </ClInclude>
+    <ClInclude Include="media\mf-video-decoder.h">
+      <Filter>media</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
