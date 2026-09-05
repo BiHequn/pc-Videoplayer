@@ -5,6 +5,7 @@
 #include"video-frame-queue.h"
 
 #include <atomic>
+#include <cstring>
 #include <iostream>
 #include <thread>
 #include <utility>
@@ -19,7 +20,10 @@ extern "C"
 #include<libswresample/swresample.h>
 }
 
-
+extern "C"
+{
+ #include<libavcodec/bsf.h>
+}
 
 static AVFormatContext* g_formatContext = nullptr;
 
@@ -33,8 +37,6 @@ static std::vector<unsigned char>g_audioPcmBuffer;
 static int g_audioSampleRate = 0;
 static int g_audioChannels = 0;
 static bool g_audioPcmLogged = false;
-
-
 
 static unsigned int g_frameIntervalMs = 33;
 //pts
@@ -77,17 +79,15 @@ static void videoDecodeThreadMain();
 static bool startPlaybackThreads();
 
 static std::unique_ptr<IVideoDecoder> g_videoDecoder;
+static AVBSFContext* g_videoBsf = nullptr;
+
 
 static void printFfmpegError(const char* operation, int errorCode)
 {
   char errorText[AV_ERROR_MAX_STRING_SIZE] = {};
   av_strerror(errorCode, errorText, sizeof(errorText));
 
-  std::cerr
-    << operation
-    << " failed: "
-    << errorText
-    << std::endl;
+  std::cerr << operation<< " failed: "<< errorText<< std::endl;
 }
 
 static int ffmpegInterruptCallback(void*)
@@ -108,6 +108,59 @@ static VideoCodec toVideoCodec(AVCodecID codecId)
         default:
             return VideoCodec::Unknown;
     }
+}
+
+static bool initializeVideoBsf(
+    AVStream* stream,
+    VideoDecoderConfig* config)
+{
+    if (!stream || !config)
+        return false;
+
+    const char* filterName = nullptr;
+
+    if (stream->codecpar->codec_id == AV_CODEC_ID_H264)
+        filterName = "h264_mp4toannexb";
+    else if (stream->codecpar->codec_id == AV_CODEC_ID_HEVC)
+        filterName = "hevc_mp4toannexb";
+    else
+        return true;
+
+    const AVBitStreamFilter* filter =
+        av_bsf_get_by_name(filterName);
+
+    if (!filter)
+        return false;
+
+    if (av_bsf_alloc(filter, &g_videoBsf) < 0)
+        return false;
+
+    if (avcodec_parameters_copy(
+        g_videoBsf->par_in,
+        stream->codecpar) < 0)
+    {
+        av_bsf_free(&g_videoBsf);
+        return false;
+    }
+
+    g_videoBsf->time_base_in = stream->time_base;
+
+    if (av_bsf_init(g_videoBsf) < 0)
+    {
+        av_bsf_free(&g_videoBsf);
+        return false;
+    }
+
+    if (g_videoBsf->par_out->extradata &&
+        g_videoBsf->par_out->extradata_size > 0)
+    {
+        config->extraData.assign(
+            g_videoBsf->par_out->extradata,
+            g_videoBsf->par_out->extradata +
+            g_videoBsf->par_out->extradata_size);
+    }
+
+    return true;
 }
 
 static void demuxThreadMain()
@@ -271,18 +324,54 @@ bool openFfmpegVideo(
   decoderConfig.timeBase.denominator =
       videoStream->time_base.den;
 
-  if (codecParameters->extradata &&
-      codecParameters->extradata_size > 0)
+  if (codecParameters->extradata &&codecParameters->extradata_size > 0)
   {
-      decoderConfig.extraData.assign(
-          codecParameters->extradata,
-          codecParameters->extradata +
-          codecParameters->extradata_size);
+      decoderConfig.extraData.assign(codecParameters->extradata,codecParameters->extradata + codecParameters->extradata_size);
+  }
+
+  VideoDecoderConfig originalDecoderConfig =decoderConfig;
+
+  VideoDecoderBackend activeBackend = backend;
+  if (backend == VideoDecoderBackend::Auto &&
+      g_formatContext->iformat &&
+      g_formatContext->iformat->name &&
+      std::strcmp(g_formatContext->iformat->name, "flv") == 0)
+  {
+      g_videoDecoder =
+          createVideoDecoder(VideoDecoderBackend::Ffmpeg);
+      if (!g_videoDecoder)
+      {
+          std::cerr
+              << "FFmpeg decoder is unavailable for FLV."
+              << std::endl;
+          closeFfmpegVideo();
+          return false;
+      }
+
+      activeBackend = VideoDecoderBackend::Ffmpeg;
+      std::cerr
+          << "Auto decoder uses FFmpeg for FLV compatibility."
+          << std::endl;
+  }
+
+  if (activeBackend != VideoDecoderBackend::Ffmpeg)
+  {
+      if (!initializeVideoBsf(
+          videoStream,
+          &decoderConfig))
+      {
+          std::cerr
+              << "Initialize video bitstream filter failed."
+              << std::endl;
+
+          closeFfmpegVideo();
+          return false;
+      }
   }
 
   if (!g_videoDecoder->initialize(decoderConfig))
   {
-      if (backend != VideoDecoderBackend::Auto)
+      if (activeBackend != VideoDecoderBackend::Auto)
       {
           std::cerr
               << "Requested decoder initialization failed."
@@ -299,9 +388,10 @@ bool openFfmpegVideo(
 
       g_videoDecoder.reset();
 
-      g_videoDecoder =
-          createVideoDecoder(
-              VideoDecoderBackend::Ffmpeg);
+      av_bsf_free(&g_videoBsf);
+      decoderConfig = originalDecoderConfig;
+
+      g_videoDecoder = createVideoDecoder(VideoDecoderBackend::Ffmpeg);
 
       if (!g_videoDecoder ||
           !g_videoDecoder->initialize(decoderConfig))
@@ -823,7 +913,7 @@ static bool receiveDecodedVideoFrames()
     return true;
 }
 
-static bool decodeVideoPacket(const AVPacket* packet)
+static bool sendVideoPacketToDecoder(const AVPacket* packet)
 {
     if (!g_videoDecoder)
         return false;
@@ -894,6 +984,91 @@ static bool decodeVideoPacket(const AVPacket* packet)
     }
 
     return receiveDecodedVideoFrames();
+}
+
+static bool decodeVideoPacket(const AVPacket* packet)
+{
+    if (!g_videoBsf)
+        return sendVideoPacketToDecoder(packet);
+
+    int result = 0;
+
+    if (packet)
+    {
+        AVPacket* input = av_packet_clone(packet);
+
+        if (!input)
+            return false;
+
+        result = av_bsf_send_packet(
+            g_videoBsf,
+            input);
+
+        av_packet_free(&input);
+    }
+    else
+    {
+        result = av_bsf_send_packet(
+            g_videoBsf,
+            nullptr);
+    }
+
+    if (result < 0 && result != AVERROR_EOF)
+    {
+        printFfmpegError(
+            "av_bsf_send_packet",
+            result);
+
+        return false;
+    }
+
+    AVPacket* filteredPacket =
+        av_packet_alloc();
+
+    if (!filteredPacket)
+        return false;
+
+    while (true)
+    {
+        result = av_bsf_receive_packet(
+            g_videoBsf,
+            filteredPacket);
+
+        if (result == AVERROR(EAGAIN) ||
+            result == AVERROR_EOF)
+        {
+            break;
+        }
+
+        if (result < 0)
+        {
+            printFfmpegError(
+                "av_bsf_receive_packet",
+                result);
+
+            av_packet_free(&filteredPacket);
+            return false;
+        }
+
+        bool decoded =
+            sendVideoPacketToDecoder(
+                filteredPacket);
+
+        av_packet_unref(filteredPacket);
+
+        if (!decoded)
+        {
+            av_packet_free(&filteredPacket);
+            return false;
+        }
+    }
+
+    av_packet_free(&filteredPacket);
+
+    if (!packet)
+        return sendVideoPacketToDecoder(nullptr);
+
+    return true;
 }
 
 static void stopPlaybackAfterVideoError()
@@ -1065,6 +1240,8 @@ void closeFfmpegVideo()
         g_audioDecodeThread.join();
     if (g_videoDecodeThread.joinable())
         g_videoDecodeThread.join();
+
+    av_bsf_free(&g_videoBsf);
 
     clearMediaPacketQueue(&g_audioPacketQueue);
     clearMediaPacketQueue(&g_videoPacketQueue);

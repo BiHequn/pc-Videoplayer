@@ -126,12 +126,12 @@ _CONSOLE;
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir);$(SolutionDir)..\vcpkg_installed\x64-windows-static\include</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winmm.lib;mfplat.lib;mf.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winhttp.lib;shlwapi.lib;comctl32.lib;winmm.lib;mfplat.lib;mf.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ShowProgress>LinkVerboseSAFESEH</ShowProgress>
       <AdditionalLibraryDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
@@ -156,7 +156,7 @@ _CONSOLE;
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winmm.lib;mfplat.lib;mf.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;avformat.lib;avcodec.lib;swscale.lib;swresample.lib;avutil.lib;secur32.lib;Ws2_32.lib;mfuuid.lib;ole32.lib;strmiids.lib;user32.lib;bcrypt.lib;winhttp.lib;shlwapi.lib;comctl32.lib;winmm.lib;mfplat.lib;mf.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ShowProgress>LinkVerboseSAFESEH</ShowProgress>
       <AdditionalLibraryDirectories>$(SolutionDir)..\vcpkg_installed\x64-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
@@ -164,11 +164,13 @@ _CONSOLE;
   <ItemGroup>
     <ClCompile Include="app\app-runtime.cpp" />
     <ClCompile Include="app\main.cpp" />
+    <ClCompile Include="app\source-selection-dialog.cpp" />
     <ClCompile Include="media\ffmpeg-decoder.cpp" />
     <ClCompile Include="media\ffmpeg-runtime.cpp" />
     <ClCompile Include="media\ffmpeg-video-decoder.cpp" />
     <ClCompile Include="media\media-packet-queue.cpp" />
     <ClCompile Include="media\mf-video-decoder.cpp" />
+    <ClCompile Include="media\vod-downloader.cpp" />
     <ClCompile Include="media\video-decoder-factory.cpp" />
     <ClCompile Include="media\video-frame-queue.cpp" />
     <ClCompile Include="platform\parent-watch.cpp" />
@@ -180,11 +182,13 @@ _CONSOLE;
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="app\app-runtime.h" />
+    <ClInclude Include="app\source-selection-dialog.h" />
     <ClInclude Include="media\ffmpeg-decoder.h" />
     <ClInclude Include="media\ffmpeg-runtime.h" />
     <ClInclude Include="media\ffmpeg-video-decoder.h" />
     <ClInclude Include="media\media-packet-queue.h" />
     <ClInclude Include="media\mf-video-decoder.h" />
+    <ClInclude Include="media\vod-downloader.h" />
     <ClInclude Include="media\video-decoder-factory.h" />
     <ClInclude Include="media\video-decoder.h" />
     <ClInclude Include="media\video-frame-queue.h" />

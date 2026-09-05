@@ -9,12 +9,12 @@
 #include <string.h>
 #include <windows.h>
 
-#include<commdlg.h>
 #include<string>
 
 #include"media/video-decoder-factory.h"
 #include<utility>
 
+#include"source-selection-dialog.h"
 //参数解析
 static DWORD parseParentPid(int argc, char* argv[])
 {
@@ -78,46 +78,6 @@ static bool parseVideoDecoderBackend(int argc, char* argv[], VideoDecoderBackend
 }
 
 //文件选择函数
-static std::string wideToUtf8(const wchar_t* text)
-{
-    int size = WideCharToMultiByte(
-        CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
-
-    if (size <= 1)
-        return {};
-
-    std::string result(size, '\0');
-
-    WideCharToMultiByte(
-        CP_UTF8, 0, text, -1,
-        result.data(), size, nullptr, nullptr);
-
-    result.pop_back();
-    return result;
-}
-
-static std::string selectVideoFile()
-{
-    wchar_t filePath[32768] = {};
-
-    OPENFILENAMEW dialog = {};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.lpstrFile = filePath;
-    dialog.nMaxFile = static_cast<DWORD>(std::size(filePath));
-    dialog.lpstrFilter =
-        L"视频文件\0*.mp4;*.flv;*.m3u8;*.mkv;*.avi;*.mov;*.webm\0"
-        L"所有文件\0*.*\0";
-    dialog.nFilterIndex = 1;
-    dialog.Flags =
-        OFN_EXPLORER |
-        OFN_FILEMUSTEXIST |
-        OFN_PATHMUSTEXIST;
-
-    if (!GetOpenFileNameW(&dialog))
-        return {};
-
-    return wideToUtf8(filePath);
-}
 
 int runNativePlayer(int argc, char* argv[])
 {
@@ -145,11 +105,11 @@ int runNativePlayer(int argc, char* argv[])
 
     if (!source || source[0] == '\0')
     {
-        selectedSource = selectVideoFile();
-
-        // 用户取消选择，正常退出
-        if (selectedSource.empty())
+        if (!showSourceSelectionDialog(
+            &selectedSource))
+        {
             return 0;
+        }
 
         source = selectedSource.c_str();
     }

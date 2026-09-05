@@ -30,8 +30,6 @@ extern "C"
 
 #include<mfobjects.h>
 
-
-
 using Microsoft::WRL::ComPtr;
 
 struct MfVideoDecoder::Impl
