@@ -27,7 +27,9 @@ using json = nlohmann::json;
 
 constexpr std::size_t kMaxWorkers = 4;
 constexpr int kMaxAttempts = 3;
-constexpr std::uint64_t kCheckpointBytes = 4ULL * 1024 * 1024;
+constexpr std::uint64_t kResumeCheckpointBytes = 1ULL * 1024 * 1024;
+constexpr std::uint64_t kSingleWorkerLimit = 4ULL * 1024 * 1024;
+constexpr std::uint64_t kTwoWorkerLimit = 16ULL * 1024 * 1024;
 constexpr DWORD kBufferSize = 64 * 1024;
 constexpr std::size_t kMaxPlaylistBytes = 8 * 1024 * 1024;
 
@@ -652,7 +654,7 @@ bool loadMediaPlaylist(const std::string &url, const std::atomic_bool &cancelled
 }
 
 std::vector<RangeState> createRanges(std::uint64_t total) {
-    std::size_t count = total < kCheckpointBytes ? 1 : total < kCheckpointBytes * 4 ? 2 : kMaxWorkers;
+    std::size_t count = total < kSingleWorkerLimit ? 1 : total < kTwoWorkerLimit ? 2 : kMaxWorkers;
     std::vector<RangeState> result;
     std::uint64_t base = total / count;
     std::uint64_t remainder = total % count;
@@ -817,6 +819,32 @@ VodDownloadResult downloadFlv(const std::string &url, const std::string &hash, c
         failed.store(true);
     };
 
+    auto persistRangeProgress = [&](std::size_t index, std::uint64_t current, HANDLE file,
+                                    std::wstring *persistError) {
+        if (!FlushFileBuffers(file)) {
+            setError(persistError, L"Cannot flush FLV cache.");
+            return false;
+        }
+
+        std::uint64_t completed = 0;
+        {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            RangeState &range = state.ranges[index];
+            if (current <= range.next) return true;
+
+            std::uint64_t previous = range.next;
+            range.next = (std::min)(current, range.end);
+            if (!saveState(statePath, state, persistError)) {
+                range.next = previous;
+                return false;
+            }
+            completed = coveredBytes(state.ranges);
+        }
+
+        reporter.report(completed, state.contentLength);
+        return true;
+    };
+
     for (std::size_t index = 0; index < state.ranges.size(); ++index) {
         if (state.ranges[index].next >= state.ranges[index].end) continue;
 
@@ -855,35 +883,30 @@ VodDownloadResult downloadFlv(const std::string &url, const std::string &hash, c
                         }
                         current += size;
 
-                        if (current == end || current - checkpoint >= kCheckpointBytes) {
-                            if (!FlushFileBuffers(file)) {
+                        if (current == end || current - checkpoint >= kResumeCheckpointBytes) {
+                            if (!persistRangeProgress(index, current, file, &requestError)) {
                                 localFailure = true;
-                                requestError = L"Cannot flush FLV cache.";
                                 return false;
                             }
-
-                            std::uint64_t completed;
-                            {
-                                std::lock_guard<std::mutex> lock(stateMutex);
-                                state.ranges[index].next = current;
-                                if (!saveState(statePath, state, &requestError)) {
-                                    localFailure = true;
-                                    return false;
-                                }
-                                completed = coveredBytes(state.ranges);
-                            }
-                            reporter.report(completed, state.contentLength);
                             checkpoint = current;
                         }
                         return !cancelled.load() && !failed.load();
                     },
                     cancelled, nullptr, &requestError);
 
+                if (!ok && current > checkpoint) {
+                    if (!persistRangeProgress(index, current, file, &requestError))
+                        localFailure = true;
+                    else
+                        checkpoint = current;
+                }
+
                 if (ok && current == end) break;
                 if (localFailure) {
-                    setFailure(requestError);
+                    if (!cancelled.load()) setFailure(requestError);
                     break;
                 }
+                if (cancelled.load() || failed.load()) break;
                 if (attempt + 1 == kMaxAttempts)
                     setFailure(requestError.empty() ? L"FLV range failed after retries." : requestError);
                 else
