@@ -31,6 +31,7 @@ constexpr std::uint64_t kResumeCheckpointBytes = 1ULL * 1024 * 1024;
 constexpr std::uint64_t kSingleWorkerLimit = 4ULL * 1024 * 1024;
 constexpr std::uint64_t kTwoWorkerLimit = 16ULL * 1024 * 1024;
 constexpr DWORD kBufferSize = 64 * 1024;
+constexpr DWORD kNetworkTimeoutMs = 5000;
 constexpr std::size_t kMaxPlaylistBytes = 8 * 1024 * 1024;
 
 struct RangeState {
@@ -41,11 +42,12 @@ struct RangeState {
 
 struct SegmentState {
     std::string file;
+    std::uint64_t size = 0;
     bool complete = false;
 };
 
 struct DownloadState {
-    int version = 1;
+    int version = 2;
     std::string type;
     std::string urlHash;
     std::string etag;
@@ -264,7 +266,8 @@ json stateToJson(const DownloadState &state) {
 
     json segments = json::array();
     for (const auto &segment : state.segments)
-        segments.push_back({{"file", segment.file}, {"complete", segment.complete}});
+        segments.push_back(
+            {{"file", segment.file}, {"size", segment.size}, {"complete", segment.complete}});
 
     return {{"version", state.version},
             {"type", state.type},
@@ -308,12 +311,14 @@ bool loadState(const fs::path &path, DownloadState *state) {
         for (const auto &item : value.value("segments", json::array())) {
             SegmentState segment;
             segment.file = item.value("file", "");
+            segment.size = item.value("size", std::uint64_t{0});
             segment.complete = item.value("complete", false);
             if (segment.file.empty()) return false;
             loaded.segments.push_back(std::move(segment));
         }
 
-        if (loaded.version != 1 || loaded.urlHash.empty()) return false;
+        if ((loaded.version != 1 && loaded.version != 2) || loaded.urlHash.empty()) return false;
+        loaded.version = 2;
         *state = std::move(loaded);
         return true;
     } catch (...) {
@@ -431,7 +436,12 @@ bool httpRequest(const std::string &url, const std::wstring &headers, bool readB
         setError(error, L"Cannot open WinHTTP session.");
         return false;
     }
-    WinHttpSetTimeouts(session.get(), 10000, 10000, 10000, 30000);
+    WinHttpSetTimeouts(
+        session.get(),
+        kNetworkTimeoutMs,
+        kNetworkTimeoutMs,
+        kNetworkTimeoutMs,
+        kNetworkTimeoutMs);
 
     HttpHandle connection(WinHttpConnect(session.get(), host.c_str(), port, 0));
     if (!connection.get()) {
@@ -616,7 +626,9 @@ bool loadMediaPlaylist(const std::string &url, const std::atomic_bool &cancelled
                        std::string *playlistText, HttpResponse *response, std::wstring *error) {
     std::string rootText;
     HttpResponse rootResponse;
-    if (!getText(url, cancelled, &rootText, &rootResponse, error)) return false;
+    bool rootLoaded = getText(url, cancelled, &rootText, &rootResponse, error);
+    *response = rootResponse;
+    if (!rootLoaded) return false;
 
     Playlist root;
     std::string rootBase = rootResponse.finalUrl.empty() ? url : rootResponse.finalUrl;
@@ -735,6 +747,8 @@ VodDownloadResult downloadFlv(const std::string &url, const std::string &hash, c
     std::wstring error;
     HttpResponse info;
     if (!probeResource(url, cancelled, &info, &error)) return fail(error);
+    const std::string effectiveUrl =
+        info.finalUrl.empty() ? url : info.finalUrl;
 
     fs::path finalPath = directory / L"video.flv";
     fs::path partialPath = directory / L"video.flv.part";
@@ -749,7 +763,7 @@ VodDownloadResult downloadFlv(const std::string &url, const std::string &hash, c
 
             std::uint64_t offset = 0;
             bool ok = httpRequest(
-                url, {}, true, false, 0, 0, 0,
+                effectiveUrl, {}, true, false, 0, 0, 0,
                 [&](const unsigned char *data, std::size_t size) {
                     DWORD written = 0;
                     if (!WriteFile(file, data, static_cast<DWORD>(size), &written, nullptr) || written != size)
@@ -871,7 +885,7 @@ VodDownloadResult downloadFlv(const std::string &url, const std::string &hash, c
                 std::wstring requestError;
 
                 bool ok = httpRequest(
-                    url,
+                    effectiveUrl,
                     L"Range: bytes=" + std::to_wstring(current) + L"-" + std::to_wstring(end - 1) + L"\r\n" +
                         (validator.empty() ? L"" : L"If-Range: " + utf8ToWide(validator) + L"\r\n"),
                     true, true, current, end, state.contentLength,
@@ -981,7 +995,7 @@ VodDownloadResult downloadHls(const std::string &url, const std::string &hash, c
         for (std::size_t index = 0; index < playlist.segments.size(); ++index) {
             char name[64] = {};
             sprintf_s(name, "segments/%06zu.ts", index);
-            state.segments.push_back({name, false});
+            state.segments.push_back({name, 0, false});
         }
     }
 
@@ -990,8 +1004,12 @@ VodDownloadResult downloadHls(const std::string &url, const std::string &hash, c
     for (auto &segment : state.segments) {
         fs::path path = directory / utf8ToWide(segment.file);
         std::error_code fileError;
-        segment.complete = segment.complete && fs::is_regular_file(path, fileError) &&
-                           fs::file_size(path, fileError) > 0 && !fileError;
+        segment.complete =
+            segment.complete &&
+            segment.size > 0 &&
+            fs::is_regular_file(path, fileError) &&
+            fs::file_size(path, fileError) == segment.size &&
+            !fileError;
         if (segment.complete) ++completeCount;
     }
 
@@ -1021,11 +1039,12 @@ VodDownloadResult downloadHls(const std::string &url, const std::string &hash, c
             fs::path temporary = finalPath;
             temporary += L".part";
             bool done = false;
+            std::uint64_t received = 0;
             std::wstring requestError;
 
             for (int attempt = 0; attempt < kMaxAttempts && !done; ++attempt) {
                 std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-                std::uint64_t received = 0;
+                received = 0;
                 bool ok = output && httpRequest(
                                         playlist.segments[index], {}, true, false, 0, 0, 0,
                                         [&](const unsigned char *data, std::size_t size) {
@@ -1052,6 +1071,7 @@ VodDownloadResult downloadHls(const std::string &url, const std::string &hash, c
             std::uint64_t completed = 0;
             {
                 std::lock_guard<std::mutex> lock(stateMutex);
+                state.segments[index].size = received;
                 state.segments[index].complete = true;
                 for (const auto &segment : state.segments)
                     if (segment.complete) ++completed;
@@ -1099,7 +1119,8 @@ bool validCachedHls(const fs::path &directory, const DownloadState &state) {
     for (const auto &segment : state.segments) {
         std::error_code error;
         fs::path path = directory / utf8ToWide(segment.file);
-        if (!segment.complete || !fs::is_regular_file(path, error) || fs::file_size(path, error) == 0 || error)
+        if (!segment.complete || segment.size == 0 || !fs::is_regular_file(path, error) ||
+            fs::file_size(path, error) != segment.size || error)
             return false;
     }
     return true;
@@ -1142,7 +1163,7 @@ VodDownloadResult downloadVod(const std::string &url, const VodProgressCallback 
                             if (progress) progress(100);
                             return succeed(path, true);
                         }
-                    } else if (!cancelled.load()) {
+                    } else if (!cancelled.load() && remote.status == 0) {
                         if (progress) progress(100);
                         return succeed(path, true);
                     }
@@ -1159,7 +1180,7 @@ VodDownloadResult downloadVod(const std::string &url, const VodProgressCallback 
                         if (progress) progress(100);
                         return succeed(directory / L"index.m3u8", true);
                     }
-                } else if (!cancelled.load()) {
+                } else if (!cancelled.load() && remote.status == 0) {
                     if (progress) progress(100);
                     return succeed(directory / L"index.m3u8", true);
                 }

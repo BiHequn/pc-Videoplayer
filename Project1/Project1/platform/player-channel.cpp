@@ -89,6 +89,18 @@ void sendEnded()
   std::cout << "{\"version\":1,\"event\":\"ended\"}" << std::endl;
 }
 
+void sendError(const char* code)
+{
+  if (!code)
+    code = "UNKNOWN_ERROR";
+
+  std::cout
+      << "{\"version\":1,\"event\":\"error\",\"code\":\""
+      << code
+      << "\"}"
+      << std::endl;
+}
+
 void startCloseWatcher()
 {
   CreateThread(0, 0, StdinThread, 0, 0, 0);

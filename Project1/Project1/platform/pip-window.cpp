@@ -120,7 +120,29 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
               {
                   if (isFfmpegPlaybackFinished())
                   {
-                      sendEnded();
+                      PlaybackEndReason reason =
+                          getFfmpegPlaybackEndReason();
+
+                      if (reason ==
+                          PlaybackEndReason::Completed)
+                      {
+                          sendEnded();
+                      }
+                      else if (reason ==
+                          PlaybackEndReason::DemuxError)
+                      {
+                          sendError("DEMUX_ERROR");
+                      }
+                      else if (reason ==
+                          PlaybackEndReason::DecodeError)
+                      {
+                          sendError("DECODE_ERROR");
+                      }
+                      else
+                      {
+                          sendError("UNKNOWN_ERROR");
+                      }
+
                       KillTimer(hwnd, kPlaybackTimerId);
                       DestroyWindow(hwnd);
                   }

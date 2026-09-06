@@ -68,6 +68,8 @@ static std::atomic<bool> g_outputStarted(false);
 static std::atomic<bool> g_videoDecodeFinished(false);
 static std::atomic<bool> g_audioDecodeFinished(true);
 static std::atomic<bool> g_abortRequested(false);
+static std::atomic<PlaybackEndReason>
+    g_playbackEndReason(PlaybackEndReason::None);
 static QueuedVideoFrame g_displayFrame;
 
 static const size_t kAudioPacketQueueSize = 32;
@@ -172,6 +174,9 @@ static void demuxThreadMain()
             << "av_packet_alloc for demux failed."
             << std::endl;
 
+        g_playbackEndReason.store(
+            PlaybackEndReason::DemuxError);
+
         finishMediaPacketQueue(&g_audioPacketQueue);
         finishMediaPacketQueue(&g_videoPacketQueue);
         return;
@@ -192,6 +197,21 @@ static void demuxThreadMain()
 
         if (result < 0)
         {
+            if (result == AVERROR_EOF)
+            {
+                g_playbackEndReason.store(
+                    PlaybackEndReason::Completed);
+            }
+            else if (!g_abortRequested.load())
+            {
+                printFfmpegError(
+                    "av_read_frame",
+                    result);
+
+                g_playbackEndReason.store(
+                    PlaybackEndReason::DemuxError);
+            }
+
             break;
         }
 
@@ -248,6 +268,8 @@ bool openFfmpegVideo(
   closeFfmpegVideo();
   g_videoDecoder = std::move(videoDecoder);
   g_abortRequested.store(false);
+  g_playbackEndReason.store(
+      PlaybackEndReason::None);
 
   g_formatContext = avformat_alloc_context();
   if (!g_formatContext)
@@ -1073,6 +1095,9 @@ static bool decodeVideoPacket(const AVPacket* packet)
 
 static void stopPlaybackAfterVideoError()
 {
+    g_playbackEndReason.store(
+        PlaybackEndReason::DecodeError);
+
     g_abortRequested.store(true);
     g_playbackRunning.store(false);
 
@@ -1216,6 +1241,11 @@ bool isFfmpegPlaybackFinished()
 bool isFfmpegVideoFinished()
 {
     return g_videoDecodeFinished.load();
+}
+
+PlaybackEndReason getFfmpegPlaybackEndReason()
+{
+    return g_playbackEndReason.load();
 }
 
 unsigned int getFfmpegFrameIntervalMs()

@@ -15,6 +15,9 @@
 #include<utility>
 
 #include"source-selection-dialog.h"
+
+static constexpr ULONGLONG kFirstFrameTimeoutMs = 30000;
+
 //参数解析
 static DWORD parseParentPid(int argc, char* argv[])
 {
@@ -43,7 +46,7 @@ static bool parseVideoDecoderBackend(int argc, char* argv[], VideoDecoderBackend
     if (!output)
         return false;
 
-    //默认保持ffmpeg
+    // 默认优先使用 MF，失败时回退 FFmpeg。
     *output = VideoDecoderBackend::Auto;
 
     for (int i = 1; i < argc; ++i)
@@ -118,17 +121,77 @@ int runNativePlayer(int argc, char* argv[])
 
   if (!initializeFfmpeg())
     return 1;
-  if (!openFfmpegVideo(source,std::move(videoDecoder),decoderBackend))
+
+  bool fallbackAttempted = false;
+
+  auto startSoftwareFallback = [&]() -> bool
   {
+    fallbackAttempted = true;
+    closeFfmpegVideo();
+
+    std::unique_ptr<IVideoDecoder> fallbackDecoder =
+        createVideoDecoder(VideoDecoderBackend::Ffmpeg);
+
+    if (!fallbackDecoder)
+      return false;
+
+    fprintf(
+        stderr,
+        "Retrying playback with FFmpeg software decoder.\n");
+
+    return openFfmpegVideo(
+        source,
+        std::move(fallbackDecoder),
+        VideoDecoderBackend::Ffmpeg);
+  };
+
+  bool opened = openFfmpegVideo(
+      source,
+      std::move(videoDecoder),
+      decoderBackend);
+
+  // Auto 模式下，BSF 或硬解初始化失败时再尝试一次软解。
+  if (!opened &&
+      decoderBackend == VideoDecoderBackend::Auto)
+  {
+    opened = startSoftwareFallback();
+  }
+
+  if (!opened)
+  {
+    closeFfmpegVideo();
     shutdownFfmpeg();
     return 2;
   }
 
   DecodedVideoFrame firstFrame = {};
+  ULONGLONG firstFrameStart = GetTickCount64();
+
   while (!decodeNextFfmpegFrame(&firstFrame))
   {
-    if (isFfmpegVideoFinished())
+    const bool firstFrameTimedOut =
+        GetTickCount64() - firstFrameStart >=
+        kFirstFrameTimeoutMs;
+
+    if (isFfmpegVideoFinished() ||
+        firstFrameTimedOut)
     {
+      if (firstFrameTimedOut)
+      {
+        fprintf(
+            stderr,
+            "Timed out waiting for the first video frame.\n");
+      }
+
+      // Auto 模式只回退一次，避免无法播放的文件无限重试。
+      if (decoderBackend == VideoDecoderBackend::Auto &&
+          !fallbackAttempted &&
+          startSoftwareFallback())
+      {
+        firstFrameStart = GetTickCount64();
+        continue;
+      }
+
       closeFfmpegVideo();
       shutdownFfmpeg();
       return 3;
