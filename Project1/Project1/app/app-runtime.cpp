@@ -4,12 +4,18 @@
 #include "platform/parent-watch.h"
 #include "platform/pip-window.h"
 #include "platform/player-channel.h"
+#include "service/api-client.h"
+#include "service/media-client.h"
+#include "service/server-settings.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
 
+#include<atomic>
 #include<string>
+#include<thread>
+#include<vector>
 
 #include"media/video-decoder-factory.h"
 #include<utility>
@@ -38,6 +44,88 @@ static const char* parseSource(int argc, char* argv[])
       return argv[i + 1];
   }
   return nullptr;
+}
+
+static const char* parseArgument(int argc, char* argv[], const char* name)
+{
+  for (int i = 1; i < argc - 1; ++i)
+  {
+    if (strcmp(argv[i], name) == 0)
+      return argv[i + 1];
+  }
+  return nullptr;
+}
+
+static int runServerSmokeTest(int argc, char* argv[])
+{
+  const char* host = parseArgument(argc, argv, "--host");
+  const char* username = parseArgument(argc, argv, "--username");
+  const char* password = nullptr;
+  char* environmentPassword = nullptr;
+  std::size_t environmentPasswordLength = 0;
+  if (_dupenv_s(&environmentPassword, &environmentPasswordLength,
+                "VIDEOPLAYER_TEST_PASSWORD") == 0)
+    password = environmentPassword;
+  if (!host || !username || !password)
+  {
+    fprintf(stderr,
+            "--server-smoke requires --host, --username and "
+            "VIDEOPLAYER_TEST_PASSWORD.\n");
+    free(environmentPassword);
+    return 10;
+  }
+
+  ServerSettings settings;
+  settings.host.assign(host, host + strlen(host));
+  fprintf(stderr, "SMOKE_STAGE api_login\n");
+  LoginResult login = loginToApi(settings, username, password);
+  if (!login.success)
+  {
+    fwprintf(stderr, L"API login failed: %ls\n", login.error.c_str());
+    free(environmentPassword);
+    return 11;
+  }
+
+  MediaClient media;
+  fprintf(stderr, "SMOKE_STAGE media_auth\n");
+  MediaResult connected = media.connectAndAuthenticate(settings, login.accessToken);
+  if (!connected.success)
+  {
+    fwprintf(stderr, L"Media authentication failed: %ls\n", connected.error.c_str());
+    free(environmentPassword);
+    return 12;
+  }
+
+  std::vector<RemoteVideoInfo> videos;
+  fprintf(stderr, "SMOKE_STAGE video_list\n");
+  MediaResult listed = media.listVideos(&videos);
+  if (!listed.success)
+  {
+    fwprintf(stderr, L"Video list failed: %ls\n", listed.error.c_str());
+    free(environmentPassword);
+    return 13;
+  }
+  if (videos.empty())
+  {
+    printf("SERVER_SMOKE_OK videos=0\n");
+    free(environmentPassword);
+    return 0;
+  }
+
+  std::atomic_bool cancelled{false};
+  std::string path;
+  fprintf(stderr, "SMOKE_STAGE video_download id=%d\n", videos.front().id);
+  MediaResult downloaded = media.downloadVideo(videos.front().id, {}, cancelled, &path);
+  if (!downloaded.success)
+  {
+    fwprintf(stderr, L"Video download failed: %ls\n", downloaded.error.c_str());
+    free(environmentPassword);
+    return 14;
+  }
+  printf("SERVER_SMOKE_OK videos=%zu video_id=%d path=%s\n",
+         videos.size(), videos.front().id, path.c_str());
+  free(environmentPassword);
+  return 0;
 }
 
 //参数解析函数
@@ -84,6 +172,12 @@ static bool parseVideoDecoderBackend(int argc, char* argv[], VideoDecoderBackend
 
 int runNativePlayer(int argc, char* argv[])
 {
+    for (int i = 1; i < argc; ++i)
+    {
+      if (strcmp(argv[i], "--server-smoke") == 0)
+        return runServerSmokeTest(argc, argv);
+    }
+
     VideoDecoderBackend decoderBackend;
     if (!parseVideoDecoderBackend(argc, argv, &decoderBackend))
     {
@@ -103,18 +197,17 @@ int runNativePlayer(int argc, char* argv[])
         return 4;
     }
 
-    std::string selectedSource;
+    PlaybackSelection selection;
     const char* source = parseSource(argc, argv);
 
     if (!source || source[0] == '\0')
     {
-        if (!showSourceSelectionDialog(
-            &selectedSource))
+        if (!showSourceSelectionDialog(&selection))
         {
             return 0;
         }
 
-        source = selectedSource.c_str();
+        source = selection.source.c_str();
     }
 
   startParentWatch(parseParentPid(argc, argv));
@@ -219,8 +312,26 @@ int runNativePlayer(int argc, char* argv[])
 
   startFfmpegPlayback();
 
+  std::thread playReportWorker;
+  if (selection.videoId > 0 && !selection.accessToken.empty())
+  {
+      ServerSettings settings;
+      settings.host = selection.serverHost;
+      settings.mediaPort = selection.mediaPort;
+      std::string token = selection.accessToken;
+      int videoId = selection.videoId;
+      playReportWorker = std::thread([settings, token, videoId] {
+          MediaClient reporter;
+          MediaResult connection = reporter.connectAndAuthenticate(settings, token);
+          if (connection.success)
+              reporter.reportPlay(videoId);
+      });
+  }
+
   if (!startPipPlaybackTimer())
   {
+      if (playReportWorker.joinable())
+          playReportWorker.join();
       closeFfmpegVideo();
       shutdownFfmpeg();
       return 5;
@@ -228,6 +339,8 @@ int runNativePlayer(int argc, char* argv[])
   startCloseWatcher();
   sendReady();
   runPipWindowLoop();
+  if (playReportWorker.joinable())
+      playReportWorker.join();
 
   //窗口退出后，按顺序释放视频和ffmpeg网络模块
   closeFfmpegVideo();

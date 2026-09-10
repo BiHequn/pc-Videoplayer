@@ -7,3 +7,10 @@
 **/*.vcxproj.user
 vcpkg_installed/
 third_party/ffmpeg/
+.tools/
+.vcpkg/
+bin/
+dist/
+tests/*.exe
+tests/*.obj
+.localappdata/

@@ -1,0 +1,44 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  release-x64:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          $manifest = Get-Content vcpkg.json | ConvertFrom-Json
+          git clone https://github.com/microsoft/vcpkg.git .vcpkg
+          git -C .vcpkg checkout $manifest.'builtin-baseline'
+          & .\.vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          & .\.vcpkg\vcpkg.exe install `
+            --triplet x64-windows-static `
+            --x-manifest-root=. `
+            --x-install-root=.\vcpkg_installed
+
+      - name: Build Release x64
+        shell: pwsh
+        run: msbuild Project1\Project1.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Protocol smoke test
+        shell: pwsh
+        run: .\tests\run-protocol-smoke.ps1
+
+      - name: Package
+        shell: pwsh
+        run: .\scripts\package-release.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoPlayer1-windows-x64
+          path: dist/VideoPlayer1-windows-x64.zip

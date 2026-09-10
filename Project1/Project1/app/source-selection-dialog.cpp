@@ -1,4 +1,5 @@
 #include "source-selection-dialog.h"
+#include "server-video-dialog.h"
 #include "media/vod-downloader.h"
 
 #include <windows.h>
@@ -20,16 +21,18 @@ constexpr int kPlayUrlButtonId = 1003;
 constexpr int kCancelButtonId = 1004;
 constexpr int kProgressBarId = 1005;
 constexpr int kProgressTextId = 1006;
+constexpr int kServerVideoButtonId = 1007;
 
 constexpr UINT kDownloadProgressMessage = WM_APP + 1;
 constexpr UINT kDownloadFinishedMessage = WM_APP + 2;
 
 struct SourceDialogState {
-    std::string *source = nullptr;
+    PlaybackSelection *selection = nullptr;
     HWND urlEdit = nullptr;
     HWND openFileButton = nullptr;
     HWND playUrlButton = nullptr;
     HWND cancelButton = nullptr;
+    HWND serverVideoButton = nullptr;
     HWND progressBar = nullptr;
     HWND progressText = nullptr;
     HFONT font = nullptr;
@@ -131,13 +134,19 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
             0, L"BUTTON", L"\u53D6\u6D88", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 370, 105, 150, 34,
             window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCancelButtonId)), GetModuleHandleW(nullptr), nullptr);
 
+        state->serverVideoButton = CreateWindowExW(
+            0, L"BUTTON", L"\u670D\u52A1\u5668\u89C6\u9891", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            20, 150, 500, 34, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerVideoButtonId)),
+            GetModuleHandleW(nullptr), nullptr);
+
         state->progressText =
-            CreateWindowExW(0, L"STATIC", L"\u7B49\u5F85\u4E0B\u8F7D", WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 155,
+            CreateWindowExW(0, L"STATIC", L"\u7B49\u5F85\u4E0B\u8F7D", WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 205,
                             500, 22, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kProgressTextId)),
                             GetModuleHandleW(nullptr), nullptr);
 
         state->progressBar =
-            CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE, 20, 182, 500, 20, window,
+            CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE, 20, 232, 500, 20, window,
                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kProgressBarId)), GetModuleHandleW(nullptr),
                             nullptr);
 
@@ -148,6 +157,7 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
         setControlFont(state->openFileButton, state->font);
         setControlFont(state->playUrlButton, state->font);
         setControlFont(state->cancelButton, state->font);
+        setControlFont(state->serverVideoButton, state->font);
         setControlFont(state->progressText, state->font);
 
         SetFocus(state->urlEdit);
@@ -174,7 +184,7 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
         state->downloading = false;
 
         if (result && result->success && !state->downloadCancelled.load() && !state->closeWhenFinished) {
-            *state->source = result->localPath;
+            state->selection->source = result->localPath;
             state->accepted = true;
             DestroyWindow(window);
             return 0;
@@ -188,6 +198,7 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
         EnableWindow(state->urlEdit, TRUE);
         EnableWindow(state->openFileButton, TRUE);
         EnableWindow(state->playUrlButton, TRUE);
+        EnableWindow(state->serverVideoButton, TRUE);
         EnableWindow(state->cancelButton, TRUE);
 
         SetWindowTextW(state->cancelButton, L"\u53D6\u6D88");
@@ -214,7 +225,7 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
             std::string selected = selectLocalMediaFile(window);
 
             if (!selected.empty()) {
-                *state->source = selected;
+                state->selection->source = selected;
                 state->accepted = true;
                 DestroyWindow(window);
             }
@@ -249,6 +260,11 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
                 return 0;
             }
 
+            state->selection->source.clear();
+            state->selection->accessToken.clear();
+            state->selection->serverHost.clear();
+            state->selection->mediaPort = 0;
+            state->selection->videoId = 0;
             state->downloadCancelled.store(false);
             state->closeWhenFinished = false;
             state->downloading = true;
@@ -256,6 +272,7 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
             EnableWindow(state->urlEdit, FALSE);
             EnableWindow(state->openFileButton, FALSE);
             EnableWindow(state->playUrlButton, FALSE);
+            EnableWindow(state->serverVideoButton, FALSE);
 
             SetWindowTextW(state->cancelButton, L"\u53D6\u6D88\u4E0B\u8F7D");
 
@@ -281,6 +298,20 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
                 }
             });
 
+            return 0;
+        }
+
+        if (commandId == kServerVideoButtonId) {
+            ServerVideoSelection selected;
+            if (showServerVideoDialog(window, &selected)) {
+                state->selection->source = selected.localPath;
+                state->selection->accessToken = selected.accessToken;
+                state->selection->serverHost = selected.settings.host;
+                state->selection->mediaPort = selected.settings.mediaPort;
+                state->selection->videoId = selected.videoId;
+                state->accepted = true;
+                DestroyWindow(window);
+            }
             return 0;
         }
 
@@ -336,10 +367,10 @@ LRESULT CALLBACK sourceWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
 }
 } // namespace
 
-bool showSourceSelectionDialog(std::string *source) {
-    if (!source) return false;
+bool showSourceSelectionDialog(PlaybackSelection *selection) {
+    if (!selection) return false;
 
-    source->clear();
+    *selection = {};
 
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
@@ -362,14 +393,14 @@ bool showSourceSelectionDialog(std::string *source) {
     }
 
     constexpr int width = 560;
-    constexpr int height = 265;
+    constexpr int height = 315;
 
     int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
 
     int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
 
     SourceDialogState state;
-    state.source = source;
+    state.selection = selection;
 
     HWND window =
         CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName, L"Native Player - \u6253\u5F00\u5A92\u4F53",

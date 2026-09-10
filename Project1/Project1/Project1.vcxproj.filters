@@ -14,6 +14,9 @@
     <Filter Include="render">
       <UniqueIdentifier>{2C785ECB-BF80-42F7-B99A-25439DB1D4C0}</UniqueIdentifier>
     </Filter>
+    <Filter Include="service">
+      <UniqueIdentifier>{F27F06E2-AB49-4E0D-B56A-57D3B065763F}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="app\app-runtime.cpp">
@@ -23,6 +26,9 @@
       <Filter>app</Filter>
     </ClCompile>
     <ClCompile Include="app\source-selection-dialog.cpp">
+      <Filter>app</Filter>
+    </ClCompile>
+    <ClCompile Include="app\server-video-dialog.cpp">
       <Filter>app</Filter>
     </ClCompile>
     <ClCompile Include="platform\parent-watch.cpp">
@@ -67,12 +73,24 @@
     <ClCompile Include="media\vod-downloader.cpp">
       <Filter>media</Filter>
     </ClCompile>
+    <ClCompile Include="service\api-client.cpp">
+      <Filter>service</Filter>
+    </ClCompile>
+    <ClCompile Include="service\media-client.cpp">
+      <Filter>service</Filter>
+    </ClCompile>
+    <ClCompile Include="service\media-protocol.cpp">
+      <Filter>service</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="app\app-runtime.h">
       <Filter>app</Filter>
     </ClInclude>
     <ClInclude Include="app\source-selection-dialog.h">
+      <Filter>app</Filter>
+    </ClInclude>
+    <ClInclude Include="app\server-video-dialog.h">
       <Filter>app</Filter>
     </ClInclude>
     <ClInclude Include="platform\parent-watch.h">
@@ -119,6 +137,18 @@
     </ClInclude>
     <ClInclude Include="media\vod-downloader.h">
       <Filter>media</Filter>
+    </ClInclude>
+    <ClInclude Include="service\api-client.h">
+      <Filter>service</Filter>
+    </ClInclude>
+    <ClInclude Include="service\media-client.h">
+      <Filter>service</Filter>
+    </ClInclude>
+    <ClInclude Include="service\media-protocol.h">
+      <Filter>service</Filter>
+    </ClInclude>
+    <ClInclude Include="service\server-settings.h">
+      <Filter>service</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
