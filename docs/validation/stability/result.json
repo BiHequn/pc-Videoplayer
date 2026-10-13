@@ -1,0 +1,39 @@
+{
+  "activeEnd": {
+    "handles": 319,
+    "privateBytes": 29093888,
+    "rssBytes": 14716928,
+    "threads": 12
+  },
+  "baseline": {
+    "handles": 322,
+    "privateBytes": 29351936,
+    "rssBytes": 24240128,
+    "threads": 16
+  },
+  "completedCycles": 100,
+  "completedLoops": 851,
+  "cpuPercentMachine": 0.638936197298099,
+  "cpuSeconds": 460.046875,
+  "cycleSeconds": 28.9204716,
+  "elapsedSeconds": 3600.1002678,
+  "finishedUtc": "2026-10-13T12:44:04Z",
+  "fixture": "workspace/build/desktop/fixtures/audiovisual.avi",
+  "framesObserved": 78481,
+  "logicalProcessors": 20,
+  "maxAbsSyncSeconds": 0.08,
+  "operations": 500,
+  "passed": true,
+  "peak": {
+    "handles": 322,
+    "privateBytes": 29425664,
+    "rssBytes": 103723008,
+    "threads": 16
+  },
+  "requestedCycles": 100,
+  "requestedSeconds": 3600,
+  "samples": 3561,
+  "soakStartedUtc": "2026-10-13T11:44:04Z",
+  "startedUtc": "2026-10-13T11:43:34Z",
+  "originalResultSHA256": "6FA7D411313B7E7ACBB2142A50BD67F0168B103B9E07C07E45EF8D3B7E58CD69"
+}

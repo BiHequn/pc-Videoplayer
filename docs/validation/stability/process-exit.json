@@ -1,0 +1,10 @@
+{
+  "pid": 40348,
+  "processStartedUtc": "2026-10-13T11:43:34.6129292Z",
+  "exitCode": null,
+  "observedExitUtc": "2026-10-13T12:44:04.3196528Z",
+  "binarySHA256": "252AD2464D4ED2F3BCB8BD60206B46217AE602916BB392D1759999641FD2363A",
+  "exitCodeUnavailable": true,
+  "exitCodeUnavailableReason": "The monitor observed process termination using Get-Process.WaitForExit, but its ExitCode property returned null. The original process has exited; no actual numeric exit code was retained. This evidence does not certify exitCode=0.",
+  "originalProcessExitSHA256": "69173BD4BECA254FA6F017810E7682FFBAC0202929655DDA202380261832AA25"
+}

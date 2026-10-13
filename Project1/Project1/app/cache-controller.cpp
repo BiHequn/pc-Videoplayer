@@ -25,6 +25,7 @@ void CacheController::resume(){enqueue({Action::Resume});}
 void CacheController::cancel(){
     {std::lock_guard<std::mutex> lock(mutex_);
         cancelledThrough_=generation_;if(cache_)cache_->requestAbort();if(pendingCache_)pendingCache_->requestAbort();
+        if(!preparing_&&cache_)preparingState_=cache_->snapshot();
         preparing_=true;preparingState_.state=CacheState::Cancelled;
         commands_.push_back({Action::Cancel,{}, {},generation_});
     }

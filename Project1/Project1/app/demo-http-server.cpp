@@ -5,12 +5,13 @@
 #include <thread>
 #include <vector>
 
-DemoHttpServer::DemoHttpServer(std::filesystem::path root):root_(std::move(root)){}
+DemoHttpServer::DemoHttpServer(std::filesystem::path root,std::function<void(const LocalHttpRequest&)> observer):root_(std::move(root)),observer_(std::move(observer)){}
 DemoHttpServer::~DemoHttpServer(){stop();}
 bool DemoHttpServer::start(std::uint16_t port){stopping_=false;return server_.start([this](const LocalHttpRequest& r,LocalHttpResponse& o){serve(r,o);},port);}
 void DemoHttpServer::stop(){stopping_=true;server_.stop();}
 std::uint16_t DemoHttpServer::port()const{return server_.port();}
 void DemoHttpServer::serve(const LocalHttpRequest& request,LocalHttpResponse& response) {
+    if(observer_)observer_(request);
     if(request.method!="GET"&&request.method!="HEAD"){response.headers(405,0,"text/plain");return;}
     const auto& path=request.path;
     bool allowed=path=="/stream.flv"||path=="/hls/index.m3u8";

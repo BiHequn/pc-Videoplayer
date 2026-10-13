@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Win32-MSBuild" tests="2" failures="0" disabled="0" skipped="0" time="6" timestamp="2026-10-13T20:31:26">
+  <testcase name="desktop-history" classname="desktop-history" time="5.68265" status="run">
+    <properties />
+  </testcase>
+  <testcase name="generate-stream-fixtures" classname="generate-stream-fixtures" time="1.09636" status="run">
+    <properties />
+  </testcase>
+</testsuite>

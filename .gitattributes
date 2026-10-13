@@ -1,0 +1,2 @@
+# Preserve measurement bytes so SHA256 evidence remains valid on every checkout.
+docs/validation/stability/* -text whitespace=cr-at-eol

@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "minimumSeconds": 3600,
+  "sampledSeconds": 3600.02,
+  "sampleCount": 3561,
+  "continuousFrameProgress": true,
+  "continuousLoopProgress": true,
+  "maxFrameProgressGapSeconds": 1.1850000000000023,
+  "maxLoopProgressGapSeconds": 5.059999999999945,
+  "maxSampleGapSeconds": 1.1850000000000023,
+  "frames": 78481,
+  "loops": 851,
+  "observedFramesPerSecond": 21.8001566657963,
+  "weightedCpuPercentMachine": 0.638866208481725,
+  "peakSampledPrivateBytes": 29425664,
+  "peakSampledHandles": 322,
+  "peakSampledThreads": 13,
+  "samplesSHA256": "F3DFCB707595E1BEC334060F89EB38B51D2EA1BB6D7F13F1354C5999EA160297",
+  "resultSHA256": "EA2ACF46A51995F0BCA2B8DD7ED8921C9995B1FBB73A08648E480C8BC6B50CE4",
+  "verifiedUtc": "2026-10-13T12:47:53.8954151Z"
+}

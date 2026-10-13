@@ -3,6 +3,7 @@
 #include "render/desktop-renderer.h"
 #include "render/opengl-renderer.h"
 #include "cache-controller.h"
+#include "desktop-state.h"
 #include "demo-http-server.h"
 #include "service/service-client.h"
 #include "service/local-server.h"
@@ -68,7 +69,15 @@ struct DesktopApp {
     double seekValue = 0;
     bool seeking = false;
     std::string renderError;
+    std::vector<DownloadRecord> downloads;
+    std::string stateError,stateLoadError,logError,persistedSignature,lastStatusSignature,cleanupSource,cleanupTaskKey,cleanupConfirmSource,cleanupConfirmKey,cleanupNotice,removedCacheSource;
+    ULONGLONG lastPersistTick=0;
+    std::future<std::pair<bool,std::string>> cacheCleanup;
+    bool stateSaveSmoke=false,stateLoadSmoke=false;
 };
+std::string dataRoot();
+DesktopState captureDesktopState(const DesktopApp& app);
+void persistDesktopState(DesktopApp& app,bool force=false);
 std::string utf8(const wchar_t* value) {
     const int size = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
     if(size <= 1) return {};
@@ -103,8 +112,10 @@ const char* backendText(VideoDecoderBackend backend) {
 }
 void openSource(DesktopApp& app, const std::string& path) {
     if(path.empty()) return;
-    app.recent.erase(std::remove(app.recent.begin(), app.recent.end(), path), app.recent.end());
-    app.recent.insert(app.recent.begin(), path); if(app.recent.size() > 10) app.recent.resize(10);
+    if(path!=app.cache.snapshot().playbackUrl) {
+        app.recent.erase(std::remove(app.recent.begin(), app.recent.end(), path), app.recent.end());
+        app.recent.insert(app.recent.begin(), path); if(app.recent.size() > 10) app.recent.resize(10);
+    }
     app.page = 0; app.seeking = false; app.renderError.clear(); app.player.open(path, app.decoder,app.renderer.opengl);
 }
 void pickFile(DesktopApp& app) {
@@ -316,7 +327,7 @@ void settings(DesktopApp& app, float scale) {
     ImGui::EndChild();
 }
 void recent(DesktopApp& app, float scale) {
-    ImGui::BeginChild("recent",{0,0}); ImGui::Text("最近打开"); subtitle("本次会话打开的文件，点击可重新播放");
+    ImGui::BeginChild("recent",{0,0}); ImGui::Text("最近打开"); subtitle("已保存的播放记录，点击可重新播放");
     ImGui::Separator();
     if(app.recent.empty()) { ImGui::Spacing(); ImGui::Text("还没有打开视频。"); if(accentButton("选择视频")) pickFile(app); }
     const auto paths=app.recent;
@@ -333,6 +344,38 @@ std::string dataRoot() {
     const DWORD length=GetEnvironmentVariableW(L"LOCALAPPDATA",local,32768);
     auto root=length&&length<32768?std::filesystem::path(local):std::filesystem::temp_directory_path();
     return (root/L"NativePlayer").u8string();
+}
+DesktopState captureDesktopState(const DesktopApp& app) {
+    DesktopState state;state.recent=app.recent;state.downloads=app.downloads;
+    state.decoder=app.decoder==VideoDecoderBackend::Ffmpeg?1:app.decoder==VideoDecoderBackend::MediaFoundation?2:0;
+    state.brightness=app.brightness;state.volume=app.player.snapshot().volume;state.rotation=app.effects.rotation;
+    state.zoom=app.effects.zoom;state.filter=static_cast<int>(app.effects.filter);state.networkMode=app.networkMode;
+    state.showInfo=app.showInfo;state.host=app.host;state.port=std::clamp(app.port,1,65535);return state;
+}
+void persistDesktopState(DesktopApp& app,bool force) {
+    const auto now=GetTickCount64();if(!force&&now-app.lastPersistTick<1000)return;app.lastPersistTick=now;
+    const auto cache=app.cache.snapshot();
+    if(!cache.source.empty()&&cache.source!=app.removedCacheSource&&cache.state!=CacheState::Idle) {
+        auto found=std::find_if(app.downloads.begin(),app.downloads.end(),[&](const DownloadRecord& r){return r.source==cache.source;});
+        DownloadRecord record{cache.source,cache.total,cache.downloaded,std::to_string(static_cast<int>(cache.state)),false};
+        if(found==app.downloads.end()){app.downloads.insert(app.downloads.begin(),std::move(record));if(app.downloads.size()>100)app.downloads.resize(100);}
+        else {record.taskKey=found->taskKey;*found=std::move(record);}
+    }
+    const auto state=captureDesktopState(app);
+    nlohmann::json signature{{"recent",state.recent},{"decoder",state.decoder},{"brightness",state.brightness},{"volume",state.volume},
+        {"rotation",state.rotation},{"zoom",state.zoom},{"filter",state.filter},{"networkMode",state.networkMode},{"showInfo",state.showInfo},{"host",state.host},{"port",state.port},{"downloads",nlohmann::json::array()}};
+    for(const auto& record:state.downloads)signature["downloads"].push_back({record.source,record.total,record.downloaded,record.state,record.requiresSource,record.taskKey});
+    const auto value=signature.dump();if(value==app.persistedSignature&&!force)return;
+    if(saveDesktopState(dataRoot(),state,app.stateError))app.persistedSignature=value;
+}
+void openDataFolder(DesktopApp& app,const char* child) {
+    try {const auto path=std::filesystem::u8path(dataRoot())/child;std::filesystem::create_directories(path);
+        if(reinterpret_cast<INT_PTR>(ShellExecuteW(app.window,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)app.stateError="无法打开数据目录。";
+    }catch(const std::exception&){app.stateError="无法创建或打开数据目录，请检查权限。";}
+}
+void beginCacheCleanup(DesktopApp& app,const std::string& source,const std::string& taskKey={}) {
+    if(app.cacheCleanup.valid()||!app.cleanupSource.empty())return;
+    app.cleanupSource=source;app.cleanupTaskKey=taskKey;app.cleanupNotice="正在停止任务并清理缓存…";app.cacheAutoPlay=false;app.player.stop();app.cache.cancel();
 }
 const char* cacheStatus(CacheState state) {
     switch(state) {
@@ -351,7 +394,8 @@ const char* uploadStatus(UploadState state) {
     }
 }
 void startCache(DesktopApp& app) {
-    if(!app.networkUrl[0])return;
+    if(!app.networkUrl[0]||!app.cleanupSource.empty()||app.cacheCleanup.valid())return;
+    app.removedCacheSource.clear();
     app.player.stop();app.cacheAutoPlay=true;app.cachePlayWhenComplete=app.networkMode==2;
     app.cache.start(app.networkUrl,(std::filesystem::u8path(dataRoot())/"cache").u8string());
 }
@@ -428,7 +472,7 @@ void pickUpload(DesktopApp& app) {
 }
 void transferPage(DesktopApp& app,float scale) {
     ImGui::BeginChild("transfers",{0,0});ImGui::Text("传输中心");subtitle("下载缓存与分片上传");ImGui::Separator();
-    const auto cache=app.cache.snapshot();ImGui::Text("下载 · %s",cacheStatus(cache.state));
+    auto cache=app.cache.snapshot();if(cache.source==app.removedCacheSource)cache={};ImGui::Text("下载 · %s",cacheStatus(cache.state));
     if(!cache.source.empty()){ImGui::TextWrapped("%s",cache.source.c_str());
         ImGui::ProgressBar(cache.total?float(double(cache.downloaded)/cache.total):0,{-1,24*scale});
         ImGui::Text("%.2f / %.2f MB · %.2f MB/s",cache.downloaded/1048576.,cache.total/1048576.,cache.bytesPerSecond/1048576.);
@@ -443,6 +487,32 @@ void transferPage(DesktopApp& app,float scale) {
         if(cache.state==CacheState::Complete && ImGui::Button("播放缓存"))openSource(app,cache.playbackUrl);
         if(!cache.error.empty())ImGui::TextWrapped("%s",cache.error.c_str());
     }else {subtitle("从网络播放页添加下载。");if(ImGui::Button("添加网络点播"))app.page=3;}
+    ImGui::Spacing();
+    if(ImGui::Button("打开缓存目录"))openDataFolder(app,"cache");ImGui::SameLine();
+    if(ImGui::Button("打开诊断目录"))openDataFolder(app,"");
+    if(!app.cleanupNotice.empty())ImGui::TextWrapped("%s",app.cleanupNotice.c_str());
+    if(!app.downloads.empty()&&ImGui::CollapsingHeader("下载历史与恢复")) {
+        const auto history=app.downloads;
+        for(std::size_t i=0;i<history.size();++i){const auto& record=history[i];ImGui::PushID(static_cast<int>(i));
+            ImGui::TextWrapped("%s",record.source.c_str());ImGui::Text("%.2f / %.2f MB",record.downloaded/1048576.,record.total/1048576.);
+            ImGui::BeginDisabled(record.requiresSource||!app.cleanupSource.empty()||app.cacheCleanup.valid());
+            if(ImGui::Button("恢复下载")){strncpy_s(app.networkUrl,record.source.c_str(),_TRUNCATE);startCache(app);}
+            ImGui::EndDisabled();
+            ImGui::SameLine();ImGui::BeginDisabled((record.requiresSource&&record.taskKey.empty())||!app.cleanupSource.empty()||app.cacheCleanup.valid());
+            if(ImGui::Button("清理缓存")){app.cleanupNotice="";app.cleanupConfirmSource=record.source;app.cleanupConfirmKey=record.taskKey;}ImGui::EndDisabled();
+            if(record.requiresSource)subtitle("此地址含临时访问参数，请在网络页重新输入完整地址。");
+            ImGui::Separator();ImGui::PopID();
+        }
+    }
+    if(!app.cleanupConfirmSource.empty())ImGui::OpenPopup("清理此任务");
+    bool confirmOpen=true;
+    if(ImGui::BeginPopupModal("清理此任务",&confirmOpen,ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("将停止当前播放与下载，删除所选任务缓存。恢复时需要重新下载。");
+        ImGui::TextWrapped("%s",app.cleanupConfirmSource.c_str());
+        if(ImGui::Button("删除缓存")){const auto source=app.cleanupConfirmSource,key=app.cleanupConfirmKey;app.cleanupConfirmSource.clear();app.cleanupConfirmKey.clear();beginCacheCleanup(app,source,key);ImGui::CloseCurrentPopup();}
+        ImGui::SameLine();if(ImGui::Button("保留")){app.cleanupConfirmSource.clear();ImGui::CloseCurrentPopup();}ImGui::EndPopup();
+    }
+    if(!confirmOpen)app.cleanupConfirmSource.clear();
     ImGui::Spacing();ImGui::Separator();const auto upload=app.service.uploadSnapshot();
     ImGui::Text("上传 · %s",uploadStatus(upload.state));
     const auto service=app.service.snapshot();ImGui::BeginDisabled(!service.authenticated);
@@ -463,6 +533,18 @@ void transferPage(DesktopApp& app,float scale) {
     ImGui::EndChild();
 }
 void pollBackground(DesktopApp& app) {
+    if(!app.cleanupSource.empty()&&!app.cacheCleanup.valid()&&app.player.snapshot().state==PlaybackState::Idle) {
+        const auto root=dataRoot(),source=app.cleanupSource,key=app.cleanupTaskKey;
+        app.cacheCleanup=std::async(std::launch::async,[root,source,key]{std::string error;
+            for(int attempt=0;attempt<30;++attempt){if(key.empty()?removeDesktopCache(root,source,error):removeDesktopCacheByKey(root,key,error))return std::make_pair(true,std::string());std::this_thread::sleep_for(std::chrono::milliseconds(100));}
+            return std::make_pair(false,error);});
+    }
+    if(app.cacheCleanup.valid()&&app.cacheCleanup.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        const auto result=app.cacheCleanup.get();
+        if(result.first){app.removedCacheSource=app.cleanupSource;app.downloads.erase(std::remove_if(app.downloads.begin(),app.downloads.end(),[&](const DownloadRecord& r){return app.cleanupTaskKey.empty()?r.source==app.cleanupSource:r.taskKey==app.cleanupTaskKey;}),app.downloads.end());app.cleanupNotice="缓存已清理。";}
+        else app.cleanupNotice="缓存清理失败："+result.second;
+        app.cleanupSource.clear();app.cleanupTaskKey.clear();persistDesktopState(app,true);
+    }
     if(app.serverStart.valid()&&app.serverStart.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
         try {app.localServer=app.serverStart.get();if(app.localServer) {
             const auto connection=app.service.snapshot();
@@ -477,6 +559,11 @@ void pollBackground(DesktopApp& app) {
         (!app.cachePlayWhenComplete || cache.state==CacheState::Complete)) {
         app.openedCacheGeneration=generation;openSource(app,cache.playbackUrl);
     }
+    const auto playback=app.player.snapshot();const auto connection=app.service.snapshot();const auto upload=app.service.uploadSnapshot();
+    const auto logSignature=std::to_string(static_cast<int>(playback.state))+":"+playback.error+":"+std::to_string(static_cast<int>(cache.state))+":"+cache.error+":"+
+        std::to_string(static_cast<int>(connection.state))+":"+connection.code+":"+connection.error+":"+std::to_string(static_cast<int>(upload.state))+":"+upload.code+":"+upload.error;
+    if(logSignature!=app.lastStatusSignature){app.lastStatusSignature=logSignature;appendDesktopLog(dataRoot(),"state",logSignature,app.logError);}
+    persistDesktopState(app);
 }
 void draw(DesktopApp& app, const PlaybackSnapshot& state, const std::shared_ptr<const PlaybackFrame>& frame, float scale) {
     ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -487,6 +574,9 @@ void draw(DesktopApp& app, const PlaybackSnapshot& state, const std::shared_ptr<
     ImGui::TextColored(state.state == PlaybackState::Error ? ImVec4{1,.52f,.48f,1} : kAccent,"%s",statusText(state.state));
     ImGui::SameLine(); subtitle(state.width > 0 ? (std::to_string(state.width)+" x "+std::to_string(state.height)+"  /  "+backendText(state.backend)).c_str() : "本地播放 · 独立窗口");
     ImGui::EndChild();
+    if(!app.stateError.empty())ImGui::TextWrapped("设置保存：%s",app.stateError.c_str());
+    if(!app.stateLoadError.empty()){ImGui::TextWrapped("设置读取：%s",app.stateLoadError.c_str());ImGui::SameLine();if(ImGui::SmallButton("知道了"))app.stateLoadError.clear();}
+    if(!app.logError.empty())ImGui::TextWrapped("诊断记录：%s",app.logError.c_str());
     if(app.page == 1) recent(app,scale);
     else if(app.page == 2) settings(app,scale);
     else if(app.page == 3) networkPage(app,scale);
@@ -509,6 +599,17 @@ void draw(DesktopApp& app, const PlaybackSnapshot& state, const std::shared_ptr<
 int runDesktopPlayer(int argc,char** argv) {
     ImGui_ImplWin32_EnableDpiAwareness();
     DesktopApp app;
+    for(int i=1;i<argc;++i){
+        if(std::strcmp(argv[i],"--data-root")==0&&i+1<argc)overrideDataRoot=argv[++i];
+        else if(std::strcmp(argv[i],"--state-save-smoke")==0)app.stateSaveSmoke=true;
+        else if(std::strcmp(argv[i],"--state-load-smoke")==0)app.stateLoadSmoke=true;
+    }
+    for(int i=1;i+1<argc;++i)if(std::strcmp(argv[i],"--second-layer-smoke")==0)overrideDataRoot=(std::filesystem::absolute(std::filesystem::u8path(argv[++i]))/"data").u8string();
+    const auto saved=loadDesktopState(dataRoot(),app.stateLoadError);app.recent=saved.recent;app.downloads=saved.downloads;
+    app.decoder=saved.decoder==1?VideoDecoderBackend::Ffmpeg:saved.decoder==2?VideoDecoderBackend::MediaFoundation:VideoDecoderBackend::Auto;
+    app.brightness=saved.brightness;app.effects.rotation=saved.rotation;app.effects.zoom=saved.zoom;app.effects.filter=static_cast<VideoFilter>(saved.filter);
+    app.showInfo=saved.showInfo;app.networkMode=saved.networkMode;app.port=saved.port;strncpy_s(app.host,saved.host.c_str(),_TRUNCATE);app.player.setVolume(saved.volume);
+    if(app.stateLoadSmoke&&(std::abs(saved.brightness-1.25f)>.001f||std::abs(saved.zoom-1.5f)>.001f||saved.rotation!=90||saved.filter!=1||std::abs(saved.volume-.4f)>.001f||saved.networkMode!=2||saved.recent.empty()))return 6;
     for(int i=1;i+1<argc;++i)if(std::strcmp(argv[i],"--renderer")==0)app.renderer.opengl=std::strcmp(argv[++i],"d3d11")!=0;
     WNDCLASSEXW wc{sizeof(wc)}; wc.style=CS_CLASSDC; wc.lpfnWndProc=windowProc;
     wc.hInstance=GetModuleHandleW(nullptr); wc.hCursor=LoadCursorW(nullptr,IDC_ARROW); wc.lpszClassName=L"NativePlayerDesktop";
@@ -533,7 +634,7 @@ int runDesktopPlayer(int argc,char** argv) {
     DragAcceptFiles(window,TRUE);
     HANDLE parent=nullptr;
     std::string smokeDirectory;
-    std::string secondSmoke, demoFixtures;
+    std::string secondSmoke, demoFixtures,historySmoke,historySource,historyAction;
     for(int i=1;i<argc;++i) {
         if(std::strcmp(argv[i],"--decoder")==0 && i+1<argc) { const auto value=std::string(argv[++i]);
           app.decoder=value == "ffmpeg" ? VideoDecoderBackend::Ffmpeg : value == "mf" ? VideoDecoderBackend::MediaFoundation : VideoDecoderBackend::Auto; }
@@ -541,6 +642,9 @@ int runDesktopPlayer(int argc,char** argv) {
         else if(std::strcmp(argv[i],"--smoke-test")==0 && i+1<argc) smokeDirectory=argv[++i];
         else if(std::strcmp(argv[i],"--second-layer-smoke")==0 && i+1<argc) secondSmoke=argv[++i];
         else if(std::strcmp(argv[i],"--demo-fixtures")==0 && i+1<argc) demoFixtures=argv[++i];
+        else if(std::strcmp(argv[i],"--history-smoke")==0 && i+1<argc) historySmoke=argv[++i];
+        else if(std::strcmp(argv[i],"--history-source")==0 && i+1<argc) historySource=argv[++i];
+        else if(std::strcmp(argv[i],"--history-action")==0 && i+1<argc) historyAction=argv[++i];
         else if(std::strcmp(argv[i],"--data-root")==0 && i+1<argc) overrideDataRoot=argv[++i];
     }
     if(!demoFixtures.empty()) {
@@ -566,9 +670,19 @@ int runDesktopPlayer(int argc,char** argv) {
     if(!secondSmoke.empty()) {
         std::filesystem::create_directories(std::filesystem::u8path(secondSmoke));
         overrideDataRoot=(std::filesystem::absolute(std::filesystem::u8path(secondSmoke))/"data").u8string();
-        app.port=0;app.page=3;
+        app.port=0;app.page=3;app.networkMode=1;app.effects={};app.brightness=1;
     }
+    if(app.stateSaveSmoke){app.brightness=1.25f;app.effects.rotation=90;app.effects.zoom=1.5f;app.effects.filter=VideoFilter::Grayscale;app.player.setVolume(.4f);app.networkMode=2;}
     if(!smokeDirectory.empty()) std::filesystem::create_directories(std::filesystem::u8path(smokeDirectory));
+    int historyStage=0;std::uint64_t restoredBytes=0;std::string historyTaskKey;
+    if(!historySmoke.empty()) {
+        std::filesystem::create_directories(std::filesystem::u8path(historySmoke));app.page=5;app.networkMode=1;
+        const auto record=std::find_if(app.downloads.begin(),app.downloads.end(),[&](const DownloadRecord& r){return r.source==historySource;});
+        if(historySource.empty()||(historyAction!="seed"&&historyAction!="resume")||(historyAction=="resume"&&(record==app.downloads.end()||record->requiresSource||!record->downloaded)))smokeResult=1;
+        if(record!=app.downloads.end()){restoredBytes=record->downloaded;historyTaskKey=record->taskKey;}
+        strncpy_s(app.networkUrl,historySource.c_str(),_TRUNCATE);
+        if(!smokeResult)startCache(app);
+    }
     auto smokeCapture=[&](const char* name) {
         const auto path=std::filesystem::u8path(smokeDirectory)/(std::string(name)+".png");
         if(!app.renderer.saveScreenshot(path.c_str())) smokeResult=1;
@@ -585,6 +699,22 @@ int runDesktopPlayer(int argc,char** argv) {
         if(!app.renderer.updateVideo(renderedFrame,app.effects)) { app.renderError="视频纹理上传失败，请停止后重新打开。"; app.player.stop(); }
         app.renderer.newFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         draw(app,renderedState,renderedFrame,scale); ImGui::Render(); app.renderer.begin(); app.renderer.present();
+        if(!historySmoke.empty()) {
+            const auto cache=app.cache.snapshot();
+            auto report=[&](bool passed,bool cleaned){std::ofstream(std::filesystem::u8path(historySmoke)/"result.json")<<nlohmann::json{{"passed",passed},{"stage",historyStage},{"downloaded",cache.downloaded},{"total",cache.total},{"restoredBytes",restoredBytes},{"cleaned",cleaned},{"cleanup",app.cleanupNotice},{"cacheError",cache.error}}.dump(2);};
+            if(historyStage==0&&renderedState.state==PlaybackState::Playing&&renderedFrame&&cache.downloaded>0&&cache.downloaded<cache.total) {
+                app.renderer.saveScreenshot((std::filesystem::u8path(historySmoke)/"playing.png").c_str());
+                if(historyAction=="seed"){app.cacheAutoPlay=false;app.player.stop();app.cache.cancel();}
+                else beginCacheCleanup(app,historySource,historyTaskKey);
+                historyStage=1;
+            }else if(historyStage==1&&historyAction=="seed"&&cache.state==CacheState::Cancelled&&cache.downloaded>0&&cache.downloaded<cache.total&&renderedState.state==PlaybackState::Idle) {
+                persistDesktopState(app,true);report(true,false);app.quitting=true;
+            }else if(historyStage==1&&historyAction=="resume"&&app.cleanupSource.empty()&&!app.cacheCleanup.valid()) {
+                const bool clean=app.removedCacheSource==historySource&&app.player.snapshot().state==PlaybackState::Idle;
+                smokeResult=clean?0:1;report(clean,clean);app.quitting=true;
+            }
+            if(smokeResult||cache.state==CacheState::Error||GetTickCount64()-smokeStart>30000){smokeResult=1;report(false,false);app.quitting=true;}
+        }
         if(!secondSmoke.empty()) {
             const auto cache=app.cache.snapshot();const auto service=app.service.snapshot();const auto upload=app.service.uploadSnapshot();
             auto nextStage=[&]{++secondStage;secondStageStart=GetTickCount64();};
@@ -646,7 +776,7 @@ int runDesktopPlayer(int argc,char** argv) {
                 smokeCapture("idle"); app.player.open("Z:/native-player-missing-test.mp4",VideoDecoderBackend::Ffmpeg); smokeStage=4; stageStart=GetTickCount64();
             } else if(smokeStage==4 && state.state==PlaybackState::Error) {
                 smokeCapture("error");
-                nlohmann::json report{{"passed",smokeResult==0},{"stages",{"playing","paused","seek-preview","idle","error"}},{"error",state.error}};
+                nlohmann::json report{{"passed",smokeResult==0},{"stages",{"playing","paused","seek-preview","idle","error"}},{"error",state.error},{"stateLoadDiagnostic",app.stateLoadError}};
                 std::ofstream(std::filesystem::u8path(smokeDirectory)/"result.json")<<report.dump(2);
                 app.quitting=true;
             }
@@ -656,6 +786,8 @@ int runDesktopPlayer(int argc,char** argv) {
             }
         }
     }
+    persistDesktopState(app,true);
+    appendDesktopLog(dataRoot(),"exit","desktop closed",app.logError);
     app.player.stop(); if(parent) CloseHandle(parent);
     app.renderer.shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
     DestroyWindow(window); UnregisterClassW(wc.lpszClassName,wc.hInstance); return smokeResult;

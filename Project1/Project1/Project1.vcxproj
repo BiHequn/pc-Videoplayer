@@ -241,6 +241,7 @@ _CONSOLE;
   </ImportGroup>
   <ItemGroup>
     <ClCompile Include="app\cache-controller.cpp" />
+    <ClCompile Include="app\desktop-state.cpp" />
     <ClCompile Include="app\demo-http-server.cpp" />
     <ClCompile Include="media\loopback-http.cpp" />
     <ClCompile Include="media\progressive-cache.cpp" />
@@ -252,6 +253,7 @@ _CONSOLE;
     <ClCompile Include="service\service-client.cpp" />
     <ClCompile Include="..\..\third_party\imgui\backends\imgui_impl_opengl3.cpp" />
     <ClInclude Include="app\cache-controller.h" />
+    <ClInclude Include="app\desktop-state.h" />
     <ClInclude Include="app\demo-http-server.h" />
     <ClInclude Include="media\loopback-http.h" />
     <ClInclude Include="media\progressive-cache.h" />

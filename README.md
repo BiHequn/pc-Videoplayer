@@ -16,6 +16,8 @@ Windows x64 原生播放器与本地传输演示，C++17 / Win32 / Dear ImGui / 
 | 下载 | HTTP FLV 分块及 MPEG-TS HLS 分片并发；进度、速度、暂停、取消保存、进程退出后续传 |
 | 边下边播 | FFmpeg 读取本机缓存 HTTP 端点；未缓存区间等待并提升下载优先级，不读取文件空洞 |
 | 可视化 | 播放器、最近打开、设置、网络播放、账号与连接、传输中心；进度与错误显示 |
+| 状态与诊断 | 设置和最近文件跨进程保存；下载历史、恢复、确认清理；脱敏日志及读写错误显示 |
+| 交付工具 | 固定演示 ZIP、SHA256 清单、隔离目录运行验证；故障测试、长测与性能对照工具 |
 
 默认桌面渲染器为 OpenGL。`--renderer d3d11` 使用兼容渲染器，`--pip` 保留第一层画中画入口。Auto 解码在初始化或首帧失败时回退 FFmpeg；网络演示推荐指定 FFmpeg。MF 后端不保证实际使用硬件解码。
 
@@ -47,6 +49,10 @@ Windows x64 原生播放器与本地传输演示，C++17 / Win32 / Dear ImGui / 
 
 普通启动默认写入 `%LOCALAPPDATA%\NativePlayer`，包括账号、上传文件和缓存；`--data-root` 可修改数据目录。演示脚本使用工作区 `build/demo-data`。下载取消保留进度；上传取消删除未完成数据。自动重连保留会话；主动断开后需要重新登录。
 
+设置与历史写入数据根的 `desktop-state.json`，诊断写入 ≤1 MiB 的 `desktop.log`。最近文件最多十项，下载历史最多一百项。带访问参数的网络地址不保存为可点击的最近记录；下载历史只保存脱敏地址，并提示重新输入原始源。跨进程续传需保持源 URL、媒体和数据根一致，随机端口的内置示例可用独立固定端口媒体服务替代。
+
+第三层交付操作见 [使用手册](docs/delivery/user-guide.md)、[架构与线程](docs/delivery/architecture.md)、[固定答辩演示](docs/delivery/demo.md) 和 [打包验收](docs/delivery/acceptance.md)。正式包完整解压后双击 `launch-demo.cmd`。
+
 快捷键：Ctrl+O 打开；空格暂停／继续；左右键跳转十秒；F11 全屏；Esc 退出全屏。
 
 ## 构建
@@ -74,6 +80,17 @@ ctest --test-dir build/desktop -C Debug --output-on-failure
 
 架构与接口见 [设计](docs/superpowers/specs/2026-10-13-second-layer-design.md)、[通信协议](docs/protocol/service-v1.md)。测试证据见 [第二层验证记录](docs/validation/2026-10-13-second-layer.md)。
 
+第三层显式测量与交付命令：
+
+```powershell
+& .\build\desktop\Release\player-soak-test.exe .\build\desktop\fixtures\audiovisual.avi .\build\third-layer\soak-60min --seconds 3600 --cycles 100
+.\scripts\run-performance.ps1 -Repeats 3 -Seconds 4 -Fps 30
+.\scripts\package-release.ps1 -Version 3.0.0 -IncludePerformance
+.\scripts\verify-release.ps1 -Version 3.0.0 -RunId final
+```
+
+长测显式运行，不加入默认完整套件；性能测量应在构建完成后串行运行。方法与指标见 [性能方法](docs/performance/method.md)，实际第三层结果见 [验证记录](docs/validation/2026-10-13-third-layer.md)。发布脚本拒绝覆盖已占用版本，重复打包应使用新版本号。
+
 ## 边界
 
 - 缓存模式支持有限、未加密、单音轨 MPEG-TS HLS 点播和可 Range 读取的 HTTP FLV。源必须提供强 ETag 或 Last-Modified；源变化使旧缓存失效。同一缓存目录只允许一个写任务。
@@ -81,6 +98,8 @@ ctest --test-dir build/desktop -C Debug --output-on-failure
 - HLS 选择首个变体；多音轨、加密、fMP4、BYTERANGE、直播缓存、DRM 未实现。直接网络播放使用 FFmpeg 能力，兼容性仍受实际源限制。
 - 0.5x/1.5x/2x 使用视频时钟并静音；1.0x 恢复音频。未实现音频变速。未增加 HDR 色调映射。
 - 账号服务仅绑定本机，协议未增加 TLS、令牌过期和公网部署治理。账号与会话 JSON 是本地演示存储。
-- 最近打开仅保留当前会话；中文字体使用 Windows 微软雅黑；底层仍为单播放实例。
+- 中文字体使用 Windows 微软雅黑；底层仍为单播放实例。桌面状态不保存密码或令牌，本地账号服务自身的会话存储属于运行数据。
 - 直接 HLS 在跳转时可能输出 FFmpeg 中断/损坏包警告；已验证能恢复控制和出帧，未承诺所有源跳转无瞬时画面瑕疵。
-- 第三层的发布打包、性能基准、长期压力测试和毕业设计文档尚需后续完成。
+- 第三层长测覆盖媒体会话，性能对照使用合成 MPEG4 视频和真实 OpenGL 渲染。它们不等同于所有编码、音画精度或整套 GUI 的长期测试；实际设备与结果限制见验证记录。
+- 发布包含实际第三方许可证；FFmpeg 静态链接的对应源码和重新链接材料尚未随包提供。另一台电脑／干净 Windows VM、磁盘写满及机器断电仍需外部验证。
+- Windows 传统文件接口仍有长路径限制；发布包建议解压到短目录，数据根完整路径建议不超过 90 字符。隔离运行验证曾发现 272 字符上传路径失败，不能宣称任意长路径均可用。
