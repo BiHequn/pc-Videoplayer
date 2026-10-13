@@ -64,7 +64,10 @@ bool FfmpegVideoDecoder::initialize(
     }
 
     AVCodecID codecId =
-        toFfmpegCodecId(config.codec);
+        static_cast<AVCodecID>(config.ffmpegCodecId);
+
+    if (codecId == AV_CODEC_ID_NONE)
+        codecId = toFfmpegCodecId(config.codec);
 
     if (codecId == AV_CODEC_ID_NONE)
         return false;

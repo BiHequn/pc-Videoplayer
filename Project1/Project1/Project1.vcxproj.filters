@@ -16,6 +16,9 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="app\desktop-player.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="app\playback-session.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="render\desktop-renderer.cpp"><Filter>render</Filter></ClCompile>
     <ClCompile Include="app\app-runtime.cpp">
       <Filter>app</Filter>
     </ClCompile>
@@ -69,6 +72,9 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="app\desktop-player.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="app\playback-session.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="render\desktop-renderer.h"><Filter>render</Filter></ClInclude>
     <ClInclude Include="app\app-runtime.h">
       <Filter>app</Filter>
     </ClInclude>

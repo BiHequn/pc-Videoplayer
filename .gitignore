@@ -6,4 +6,7 @@
 **/x64/
 **/*.vcxproj.user
 vcpkg_installed/
+.tools/
 third_party/ffmpeg/
+build/
+bin/

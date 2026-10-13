@@ -20,6 +20,7 @@ struct VideoTimeBase
 struct VideoDecoderConfig
 {
 	VideoCodec codec = VideoCodec::Unknown;
+	int ffmpegCodecId = 0;
 	int width = 0;
 	int height = 0;
 	VideoTimeBase timeBase;

@@ -111,6 +111,8 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
   }
   if (msg == WM_TIMER && wParam == kPlaybackTimerId)
   {
+      advanceFfmpegPlaybackClock();
+
       while (true)
       {
           if (!g_hasPendingFrame)
@@ -118,7 +120,16 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
               if (!decodeNextFfmpegFrame(
                   &g_pendingFrame))
               {
-                  if (isFfmpegPlaybackFinished())
+                  bool finished =
+                      isFfmpegPlaybackFinished();
+
+                  if (getFfmpegPlaybackRate() != 1.0)
+                  {
+                      finished =
+                          isFfmpegVideoFinished();
+                  }
+
+                  if (finished)
                   {
                       PlaybackEndReason reason =
                           getFfmpegPlaybackEndReason();
@@ -152,23 +163,23 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
               g_hasPendingFrame = true;
           }
 
-          double audioClock =
-              getFfmpegAudioClockSeconds();
+          double playbackClock =
+              getFfmpegPlaybackClockSeconds();
 
-          if (audioClock >= 0.0 &&
+          if (playbackClock >= 0.0 &&
               g_pendingFrame.ptsSeconds >= 0.0)
           {
               double difference =
                   g_pendingFrame.ptsSeconds -
-                  audioClock;
+                  playbackClock;
 
               if (g_clockLogCount < 20)
               {
                   std::cerr
                       << "Sync: video="
                       << g_pendingFrame.ptsSeconds
-                      << ", audio="
-                      << audioClock
+                      << ", clock="
+                      << playbackClock
                       << ", diff="
                       << difference
                       << " seconds"
@@ -245,6 +256,42 @@ LRESULT CALLBACK PipWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)//
           alpha,
           LWA_ALPHA);
 
+      return 0;
+  }
+  if (msg == WM_KEYDOWN)
+  {
+      switch (wParam)
+      {
+      case VK_LEFT:
+          seekFfmpegBySeconds(-10.0);
+          break;
+      case VK_RIGHT:
+          seekFfmpegBySeconds(10.0);
+          break;
+      case VK_UP:
+          seekFfmpegBySeconds(-30.0);
+          break;
+      case VK_DOWN:
+          seekFfmpegBySeconds(30.0);
+          break;
+      case 0x51:
+          setFfmpegPlaybackRate(0.5);
+          break;
+      case 0x57:
+          setFfmpegPlaybackRate(1.0);
+          break;
+      case 0x45:
+          setFfmpegPlaybackRate(1.5);
+          break;
+      case 0x52:
+          setFfmpegPlaybackRate(2.0);
+          break;
+      default:
+          return DefWindowProc(hwnd, msg, wParam, lParam);
+      }
+
+      g_hasPendingFrame = false;
+      g_pendingFrame = {};
       return 0;
   }
 
