@@ -61,6 +61,16 @@ int main(int argc, char** argv) {
         const auto fastStart=std::chrono::steady_clock::now();
         waitFor([&] { return player.snapshot().state == PlaybackState::Ended; });
         require(std::chrono::steady_clock::now()-fastStart < std::chrono::milliseconds(3000), "2x playback throttled by audio");
+        player.open(argv[1], VideoDecoderBackend::Ffmpeg, true);
+        waitFor([&] { return player.snapshot().state == PlaybackState::Playing; });
+        require(player.frame() && player.frame()->pixelFormat == VideoPixelFormat::Yuv420p, "native YUV session frame");
+        require(player.frame()->planeOffsets[1] > 0 && player.frame()->planeOffsets[2] > player.frame()->planeOffsets[1], "owned chroma planes");
+        player.pause(true);
+        waitFor([&] { return player.snapshot().state == PlaybackState::Paused; });
+        const auto yuvSerial = player.frame()->serial;
+        player.seek(player.snapshot().duration-.01);
+        waitFor([&] { return player.frame() && player.frame()->serial > yuvSerial; });
+        require(player.frame()->pixelFormat == VideoPixelFormat::Yuv420p && player.frame()->planeOffsets[2] > 0, "YUV EOF preview loses planes");
         std::cout << "PASS session: error/reopen, frame, pause, seek, resume, end, replay, stop\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }

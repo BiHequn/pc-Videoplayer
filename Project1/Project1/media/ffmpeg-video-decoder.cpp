@@ -9,6 +9,7 @@ extern "C"
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
+#include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
 
@@ -157,6 +158,11 @@ bool FfmpegVideoDecoder::initialize(
     }
 
     timeBase_ = config.timeBase;
+    nativeYuv_ = config.nativeYuv;
+    if (nativeYuv_) {
+        nativeFrame_ = av_frame_alloc();
+        if (!nativeFrame_) { close(); return false; }
+    }
     return true;
 }
 
@@ -235,6 +241,8 @@ VideoDecoderResult FfmpegVideoDecoder::sendPacket(
 VideoDecoderResult FfmpegVideoDecoder::receiveFrame(
     DecodedVideoFrame* frame)
 {
+    if (frame)
+        *frame = {};
     if (!codecContext_ ||
         !decodedFrame_ ||
         !frame)
@@ -261,11 +269,11 @@ VideoDecoderResult FfmpegVideoDecoder::receiveFrame(
         return VideoDecoderResult::Error;
     }
 
-    if (!convertFrameToBgra(
-        decodedFrame_,
-        frame))
+    if (!(nativeYuv_ ? exposeFrameAsYuv(decodedFrame_, frame)
+                     : convertFrameToBgra(decodedFrame_, frame)))
     {
         av_frame_unref(decodedFrame_);
+        *frame = {};
         return VideoDecoderResult::Error;
     }
 
@@ -324,6 +332,8 @@ void FfmpegVideoDecoder::flush()
 
     if (decodedFrame_)
         av_frame_unref(decodedFrame_);
+    if (nativeFrame_)
+        av_frame_unref(nativeFrame_);
 }
 
 void FfmpegVideoDecoder::close()
@@ -336,12 +346,15 @@ void FfmpegVideoDecoder::close()
 
     if (decodedFrame_)
         av_frame_free(&decodedFrame_);
+    if (nativeFrame_)
+        av_frame_free(&nativeFrame_);
 
     if (codecContext_)
         avcodec_free_context(&codecContext_);
 
     bgraBuffer_.clear();
     timeBase_ = {};
+    nativeYuv_ = false;
 }
 
 bool FfmpegVideoDecoder::convertFrameToBgra(
@@ -355,6 +368,9 @@ bool FfmpegVideoDecoder::convertFrameToBgra(
     {
         return false;
     }
+
+    if (source->width > std::numeric_limits<int>::max() / 4)
+        return false;
 
     scaleContext_ = sws_getCachedContext(
         scaleContext_,
@@ -412,6 +428,69 @@ bool FfmpegVideoDecoder::convertFrameToBgra(
     output->width = source->width;
     output->height = source->height;
     output->stride = stride;
+    output->planes[0] = output->data;
+    output->strides[0] = stride;
 
+    return true;
+}
+
+namespace {
+VideoColorSpace videoSpace(AVColorSpace space) {
+    switch (space) {
+    case AVCOL_SPC_BT709: return VideoColorSpace::Bt709;
+    case AVCOL_SPC_BT2020_NCL: return VideoColorSpace::Bt2020;
+    case AVCOL_SPC_BT470BG:
+    case AVCOL_SPC_SMPTE170M: return VideoColorSpace::Bt601;
+    default: return VideoColorSpace::Unspecified;
+    }
+}
+int swsSpace(AVColorSpace space) {
+    switch (space) {
+    case AVCOL_SPC_BT709: return SWS_CS_ITU709;
+    case AVCOL_SPC_BT2020_NCL: return SWS_CS_BT2020;
+    default: return SWS_CS_ITU601;
+    }
+}
+}
+
+bool FfmpegVideoDecoder::exposeFrameAsYuv(const AVFrame* source, DecodedVideoFrame* output) {
+    if (!source || !output || !nativeFrame_ || source->width <= 0 || source->height <= 0)
+        return false;
+    av_frame_unref(nativeFrame_);
+    const auto format = static_cast<AVPixelFormat>(source->format);
+    // Keep FFmpeg's reference-counted plane allocation alive after decodedFrame_ is unref'd.
+    // YUV420P (including full-range legacy YUVJ420P) takes no swscale or RGB path.
+    if (format == AV_PIX_FMT_YUV420P || format == AV_PIX_FMT_YUVJ420P) {
+        if (av_frame_ref(nativeFrame_, source) < 0) return false;
+    } else {
+        nativeFrame_->format = AV_PIX_FMT_YUV420P;
+        nativeFrame_->width = source->width;
+        nativeFrame_->height = source->height;
+        if (av_frame_get_buffer(nativeFrame_, 32) < 0) return false;
+        scaleContext_ = sws_getCachedContext(scaleContext_, source->width, source->height, format,
+            source->width, source->height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!scaleContext_) return false;
+        const bool full = source->color_range == AVCOL_RANGE_JPEG ||
+            format == AV_PIX_FMT_YUVJ422P || format == AV_PIX_FMT_YUVJ444P;
+        const int* coefficients = sws_getCoefficients(swsSpace(source->colorspace));
+        if (sws_setColorspaceDetails(scaleContext_, coefficients, full, coefficients, full,
+                                    0, 1 << 16, 1 << 16) < 0) return false;
+        if (sws_scale(scaleContext_, source->data, source->linesize, 0, source->height,
+                      nativeFrame_->data, nativeFrame_->linesize) != source->height) return false;
+        nativeFrame_->color_range = full ? AVCOL_RANGE_JPEG : source->color_range;
+        nativeFrame_->colorspace = source->colorspace;
+    }
+    output->pixelFormat = VideoPixelFormat::Yuv420p;
+    output->width = source->width; output->height = source->height;
+    for (int plane = 0; plane < 3; ++plane) {
+        output->planes[plane] = nativeFrame_->data[plane];
+        output->strides[plane] = nativeFrame_->linesize[plane];
+        if (!output->planes[plane] || !output->strides[plane]) return false;
+    }
+    output->data = output->planes[0]; output->stride = output->strides[0];
+    output->colorRange = (nativeFrame_->color_range == AVCOL_RANGE_JPEG || format == AV_PIX_FMT_YUVJ420P)
+        ? VideoColorRange::Full : (nativeFrame_->color_range == AVCOL_RANGE_MPEG
+                                  ? VideoColorRange::Limited : VideoColorRange::Unspecified);
+    output->colorSpace = videoSpace(nativeFrame_->colorspace);
     return true;
 }

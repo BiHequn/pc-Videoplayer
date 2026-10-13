@@ -44,3 +44,6 @@ void setFfmpegVolume(float normalized);
 VideoDecoderBackend getFfmpegEffectiveBackend();
 void requestFfmpegAbort();
 void anchorFfmpegVideoClock(double ptsSeconds);
+void setFfmpegNativeYuvOutput(bool enabled);
+void setFfmpegBuffering(bool buffering);
+std::uint64_t getFfmpegAudioCompletionCount();

@@ -10,7 +10,7 @@
 #include <vector>
 #include <atomic>
 
-enum class PlaybackState { Idle, Opening, Playing, Paused, Ended, Error };
+enum class PlaybackState { Idle, Opening, Playing, Paused, Buffering, Ended, Error };
 struct PlaybackSnapshot {
     PlaybackState state = PlaybackState::Idle;
     std::string source, error;
@@ -24,6 +24,12 @@ struct PlaybackFrame {
     std::vector<unsigned char> pixels;
     int width = 0, height = 0, stride = 0;
     std::uint64_t serial = 0;
+    VideoPixelFormat pixelFormat = VideoPixelFormat::Bgra;
+    // Owned contiguous top-to-bottom planes. BGRA accepts legacy stride when planeStrides[0] is zero.
+    std::array<std::size_t, 3> planeOffsets{};
+    std::array<int, 3> planeStrides{};
+    VideoColorRange colorRange = VideoColorRange::Unspecified;
+    VideoColorSpace colorSpace = VideoColorSpace::Unspecified;
 };
 class PlaybackSession {
 public:
@@ -31,7 +37,7 @@ public:
     ~PlaybackSession();
     PlaybackSession(const PlaybackSession&) = delete;
     PlaybackSession& operator=(const PlaybackSession&) = delete;
-    void open(std::string source, VideoDecoderBackend backend);
+    void open(std::string source, VideoDecoderBackend backend, bool nativeYuv = false);
     void pause(bool paused);
     void stop();
     void seek(double seconds);
@@ -41,12 +47,12 @@ public:
     std::shared_ptr<const PlaybackFrame> frame() const;
 private:
     enum class Action { Open, Pause, Stop, Seek, Rate, Volume };
-    struct Command { Action action; std::string source; VideoDecoderBackend backend = VideoDecoderBackend::Auto; double value = 0; };
+    struct Command { Action action; std::string source; VideoDecoderBackend backend = VideoDecoderBackend::Auto; double value = 0; bool nativeYuv = false; };
     void enqueue(Command command);
     void run();
     bool openMedia(const Command& command);
     bool interrupted() const;
-    void publishFrame(const unsigned char* data, int width, int height, int stride, double pts);
+    void publishFrame(const DecodedVideoFrame& source, double pts);
     void fail(const std::string& message);
     mutable std::mutex mutex_;
     std::condition_variable condition_;

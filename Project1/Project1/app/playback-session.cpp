@@ -1,9 +1,11 @@
 #include "playback-session.h"
 #include "media/ffmpeg-decoder.h"
 #include "media/ffmpeg-runtime.h"
+#include "media/video-frame-copy.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 PlaybackSession::PlaybackSession() { worker_ = std::thread(&PlaybackSession::run, this); }
@@ -17,8 +19,8 @@ void PlaybackSession::enqueue(Command command) {
     { std::lock_guard<std::mutex> lock(mutex_); commands_.push_back(std::move(command)); }
     condition_.notify_one();
 }
-void PlaybackSession::open(std::string source, VideoDecoderBackend backend) {
-    enqueue({Action::Open, std::move(source), backend});
+void PlaybackSession::open(std::string source, VideoDecoderBackend backend, bool nativeYuv) {
+    enqueue({Action::Open, std::move(source), backend, 0, nativeYuv});
 }
 void PlaybackSession::pause(bool paused) { enqueue({Action::Pause, {}, VideoDecoderBackend::Auto, paused ? 1.0 : 0.0}); }
 void PlaybackSession::stop() { enqueue({Action::Stop}); }
@@ -38,16 +40,18 @@ void PlaybackSession::fail(const std::string& message) {
     std::lock_guard<std::mutex> lock(mutex_);
     state_.state = PlaybackState::Error; state_.error = message;
 }
-void PlaybackSession::publishFrame(const unsigned char* data, int width, int height, int stride, double pts) {
+void PlaybackSession::publishFrame(const DecodedVideoFrame& source, double pts) {
+    QueuedVideoFrame copy;if(!copyVideoFrame(source,&copy))throw std::runtime_error("invalid decoded frame");
     auto output = std::make_shared<PlaybackFrame>();
-    output->width = width; output->height = height; output->stride = stride; output->serial = ++frameSerial_;
-    output->pixels.assign(data, data + static_cast<std::size_t>(stride) * height);
+    output->width = copy.width; output->height = copy.height; output->stride = copy.stride; output->serial = ++frameSerial_;
+    output->pixels=std::move(copy.pixels);output->pixelFormat=copy.pixelFormat;output->planeOffsets=copy.planeOffsets;output->planeStrides=copy.planeStrides;output->colorSpace=copy.colorSpace;output->colorRange=copy.colorRange;
     std::lock_guard<std::mutex> lock(mutex_);
-    frame_ = std::move(output); state_.width = width; state_.height = height;
+    frame_ = std::move(output); state_.width = source.width; state_.height = source.height;
     if(pts >= 0) state_.position = pts;
 }
 bool PlaybackSession::openMedia(const Command& command) {
     closeFfmpegVideo();
+    setFfmpegNativeYuvOutput(command.nativeYuv);
     { std::lock_guard<std::mutex> lock(mutex_);
       const float volume = state_.volume; state_ = {}; state_.volume = volume;
       state_.source = command.source; state_.state = PlaybackState::Opening; frame_.reset(); }
@@ -79,7 +83,7 @@ bool PlaybackSession::openMedia(const Command& command) {
             fail("未能解码首帧。文件可能已损坏，或当前解码器不支持该视频。"); return false;
         }
         anchorFfmpegVideoClock(first.ptsSeconds);
-        publishFrame(first.data, first.width, first.height, first.stride, first.ptsSeconds);
+        publishFrame(first, first.ptsSeconds);
         const float volume = snapshot().volume;
         setFfmpegVolume(volume); startFfmpegPlayback();
         { std::lock_guard<std::mutex> lock(mutex_); state_.duration = getFfmpegDurationSeconds();
@@ -92,6 +96,7 @@ void PlaybackSession::run() {
     setFfmpegCancellationProbe([](void* session) { return static_cast<PlaybackSession*>(session)->interrupted(); }, this);
     DecodedVideoFrame pending{};
     bool hasPending = false;
+    auto lastVideoReady = std::chrono::steady_clock::now();
     try {
       for(;;) {
         Command command{Action::Stop}; bool haveCommand = false;
@@ -100,8 +105,9 @@ void PlaybackSession::run() {
           if(quitting_) break;
           if(!commands_.empty()) { command = std::move(commands_.front()); commands_.pop_front(); haveCommand = true; } }
         if(haveCommand) {
+            lastVideoReady = std::chrono::steady_clock::now();
             const auto before = snapshot();
-            const bool active = before.state == PlaybackState::Playing || before.state == PlaybackState::Paused;
+            const bool active = before.state == PlaybackState::Playing || before.state == PlaybackState::Paused || before.state==PlaybackState::Buffering;
             if(command.action == Action::Open) {
                 hasPending = false; pending = {};
                 if(initialized) openMedia(command); else fail("FFmpeg 初始化失败。");
@@ -109,15 +115,16 @@ void PlaybackSession::run() {
                 closeFfmpegVideo(); hasPending = false; pending = {};
                 std::lock_guard<std::mutex> lock(mutex_); state_.state = PlaybackState::Idle; state_.error.clear(); state_.position = 0; frame_.reset();
             } else if(command.action == Action::Pause && active) {
-                advanceFfmpegPlaybackClock(); setFfmpegAudioPaused(command.value != 0);
+                setFfmpegBuffering(false);advanceFfmpegPlaybackClock(); setFfmpegAudioPaused(command.value != 0);
                 std::lock_guard<std::mutex> lock(mutex_); state_.state = command.value != 0 ? PlaybackState::Paused : PlaybackState::Playing;
             } else if(command.action == Action::Seek && active) {
                 const double target = before.duration > 0 ? std::clamp(command.value, 0.0, std::max(0.0, before.duration - .01)) : std::max(0.0, command.value);
                 hasPending = false; pending = {};
+                setFfmpegBuffering(false);
                 if(before.state == PlaybackState::Paused) {
                     DecodedVideoFrame preview{};
                     if(!previewFfmpegAtPosition(target, &preview)) { if(!interrupted()) fail("无法预览指定位置，请重新打开文件。"); }
-                    else publishFrame(preview.data,preview.width,preview.height,preview.stride,std::max(target,preview.ptsSeconds));
+                    else publishFrame(preview,std::max(target,preview.ptsSeconds));
                 } else if(!seekFfmpegToPosition(target)) { if(!interrupted()) fail("无法跳转到指定位置，请重新打开文件。"); }
                 else { std::lock_guard<std::mutex> lock(mutex_); state_.position = target; }
             } else if(command.action == Action::Rate && active) {
@@ -129,7 +136,8 @@ void PlaybackSession::run() {
                 std::lock_guard<std::mutex> lock(mutex_); state_.volume = static_cast<float>(command.value);
             }
         }
-        if(snapshot().state != PlaybackState::Playing) continue;
+        const auto current=snapshot();
+        if(current.state != PlaybackState::Playing && current.state!=PlaybackState::Buffering) continue;
         const auto terminalReason = getFfmpegPlaybackEndReason();
         if(terminalReason == PlaybackEndReason::DecodeError || terminalReason == PlaybackEndReason::DemuxError) {
             hasPending = false; pending = {};
@@ -137,10 +145,18 @@ void PlaybackSession::run() {
             continue;
         }
         advanceFfmpegPlaybackClock();
+        // After video drains, let buffered tail audio finish even if the last
+        // network starvation entered Buffering and no further video frame arrives.
+        if(current.state==PlaybackState::Buffering && isFfmpegVideoFinished()) {
+            setFfmpegBuffering(false);
+            std::lock_guard<std::mutex> lock(mutex_);state_.state=PlaybackState::Playing;
+        }
         const double clock = getFfmpegPlaybackClockSeconds();
         if(clock >= 0) { std::lock_guard<std::mutex> lock(mutex_); state_.position = state_.duration > 0 ? std::min(clock, state_.duration) : clock; }
         for(int count = 0; count < 12; ++count) {
             if(!hasPending) hasPending = decodeNextFfmpegFrame(&pending);
+            if(hasPending) lastVideoReady = std::chrono::steady_clock::now();
+            if(hasPending && current.state==PlaybackState::Buffering){setFfmpegBuffering(false);std::lock_guard<std::mutex> lock(mutex_);state_.state=PlaybackState::Playing;}
             if(!hasPending) {
                 if(isFfmpegPlaybackFinished() || (getFfmpegPlaybackRate() != 1.0 && isFfmpegVideoFinished())) {
                     const auto reason = getFfmpegPlaybackEndReason();
@@ -149,6 +165,11 @@ void PlaybackSession::run() {
                         state_.state = PlaybackState::Ended; if(state_.duration > 0) state_.position = state_.duration;
                     } else fail(reason == PlaybackEndReason::DemuxError ? "媒体读取失败，播放已停止。" : "视频解码失败，播放已停止。");
                 }
+                else if(std::strstr(current.source.c_str(),"://") && !isFfmpegVideoFinished() &&
+                    std::chrono::steady_clock::now()-lastVideoReady > std::chrono::milliseconds(150) &&
+                    getFfmpegPlaybackEndReason()==PlaybackEndReason::None) {
+                    setFfmpegBuffering(true); std::lock_guard<std::mutex> lock(mutex_); state_.state=PlaybackState::Buffering;
+                }
                 break;
             }
             const double diff = pending.ptsSeconds >= 0 && clock >= 0 ? pending.ptsSeconds - clock : 0;
@@ -156,7 +177,7 @@ void PlaybackSession::run() {
             if(diff > .025) break;
             hasPending = false;
             if(diff < -.15) { std::lock_guard<std::mutex> lock(mutex_); ++state_.droppedFrames; continue; }
-            publishFrame(pending.data, pending.width, pending.height, pending.stride, pending.ptsSeconds);
+            publishFrame(pending, pending.ptsSeconds);
             break;
         }
       }

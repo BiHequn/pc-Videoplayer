@@ -1,4 +1,5 @@
 #pragma once
+#include "video-decoder.h"
 #include<condition_variable>
 #include<cstddef>
 #include<deque>
@@ -12,6 +13,12 @@ struct QueuedVideoFrame
 	int height = 0;
 	int stride = 0;
 	double ptsSeconds = -1.0;
+	VideoPixelFormat pixelFormat = VideoPixelFormat::Bgra;
+	// One owned allocation; offsets address top rows in pixels, strides are positive.
+	std::array<std::size_t, 3> planeOffsets{};
+	std::array<int, 3> planeStrides{};
+	VideoColorRange colorRange = VideoColorRange::Unspecified;
+	VideoColorSpace colorSpace = VideoColorSpace::Unspecified;
 };
 
 struct VideoFrameQueue
@@ -24,6 +31,7 @@ struct VideoFrameQueue
 };
 
 bool pushVideoFrame(VideoFrameQueue* queue, const unsigned char* data, int width, int height, int stride, double ptsSeconds, size_t maxFrameCount);
+bool pushVideoFrame(VideoFrameQueue* queue, const DecodedVideoFrame& source, size_t maxFrameCount);
 bool tryPopVideoFrame(VideoFrameQueue* queue, QueuedVideoFrame* output);
 
 void finishVideoFrameQueue(VideoFrameQueue* queue);

@@ -1,9 +1,15 @@
 #include "desktop-player.h"
 #include "playback-session.h"
 #include "render/desktop-renderer.h"
+#include "render/opengl-renderer.h"
+#include "cache-controller.h"
+#include "demo-http-server.h"
+#include "service/service-client.h"
+#include "service/local-server.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
+#include "imgui_impl_opengl3.h"
 #include <windows.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -15,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <future>
 #include <nlohmann/json.hpp>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
@@ -22,13 +29,39 @@ namespace {
 constexpr ImVec4 kAccent{.38f, .80f, .68f, 1};
 constexpr ImVec4 kMuted{.48f, .54f, .63f, 1};
 constexpr ImVec4 kText{.88f, .92f, .97f, 1};
+std::string overrideDataRoot;
+struct UiRenderer {
+    bool opengl=true;
+    DesktopRenderer d3d;
+    OpenGLRenderer gl;
+    bool initialize(HWND window){return opengl?gl.initialize(window):d3d.initialize(window);}
+    void resize(unsigned int w,unsigned int h){if(opengl)gl.resize(w,h);else d3d.resize(w,h);}
+    bool updateVideo(const std::shared_ptr<const PlaybackFrame>& frame,VideoEffects effects){return opengl?gl.updateVideo(frame,effects):d3d.updateVideo(frame,effects.brightness);}
+    ImTextureID texture()const{return opengl?static_cast<ImTextureID>(gl.frameTexture()):reinterpret_cast<ImTextureID>(d3d.videoView());}
+    void newFrame(){if(opengl)ImGui_ImplOpenGL3_NewFrame();else ImGui_ImplDX11_NewFrame();}
+    void begin(){if(opengl)gl.begin();else d3d.begin();}
+    void present(){if(opengl)gl.present();else d3d.present();}
+    bool saveScreenshot(const wchar_t* path){return opengl?gl.saveScreenshot(path):d3d.saveScreenshot(path);}
+    void shutdown(){if(opengl)gl.shutdown();else d3d.shutdown();}
+};
 struct DesktopApp {
     HWND window = nullptr;
-    DesktopRenderer renderer;
+    UiRenderer renderer;
     PlaybackSession player;
+    CacheController cache;
+    ServiceClient service;
+    std::shared_ptr<LocalServer> localServer;
+    std::future<std::shared_ptr<LocalServer>> serverStart;
+    std::string serverError;
+    std::shared_ptr<DemoHttpServer> demo;
+    char networkUrl[2048]{}, host[128]="127.0.0.1", username[96]{}, password[128]{};
+    int port=18760, networkMode=1;
+    std::uint64_t openedCacheGeneration=0;
+    bool cacheAutoPlay=false,cachePlayWhenComplete=false,serverStopping=false;
     std::vector<std::string> recent;
     VideoDecoderBackend decoder = VideoDecoderBackend::Auto;
     float brightness = 1;
+    VideoEffects effects;
     bool fullscreen = false, topmost = false, showInfo = false, quitting = false, minimized = false;
     WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)};
     int page = 0;
@@ -57,6 +90,7 @@ const char* statusText(PlaybackState state) {
     switch(state) {
       case PlaybackState::Opening: return "正在打开";
       case PlaybackState::Playing: return "正在播放";
+      case PlaybackState::Buffering: return "正在缓冲";
       case PlaybackState::Paused: return "已暂停";
       case PlaybackState::Ended: return "播放结束";
       case PlaybackState::Error: return "播放失败";
@@ -71,7 +105,7 @@ void openSource(DesktopApp& app, const std::string& path) {
     if(path.empty()) return;
     app.recent.erase(std::remove(app.recent.begin(), app.recent.end(), path), app.recent.end());
     app.recent.insert(app.recent.begin(), path); if(app.recent.size() > 10) app.recent.resize(10);
-    app.page = 0; app.seeking = false; app.renderError.clear(); app.player.open(path, app.decoder);
+    app.page = 0; app.seeking = false; app.renderError.clear(); app.player.open(path, app.decoder,app.renderer.opengl);
 }
 void pickFile(DesktopApp& app) {
     wchar_t path[32768]{};
@@ -139,7 +173,7 @@ void theme(float scale) {
     c[ImGuiCol_ButtonActive] = {.20f,.32f,.32f,1};
     c[ImGuiCol_Header] = {.12f,.23f,.22f,1};
     c[ImGuiCol_HeaderHovered] = {.15f,.28f,.27f,1};
-    c[ImGuiCol_CheckMark] = kAccent; c[ImGuiCol_SliderGrab] = kAccent;
+    c[ImGuiCol_CheckMark] = kAccent; c[ImGuiCol_SliderGrab] = kAccent;c[ImGuiCol_PlotHistogram]=kAccent;
     c[ImGuiCol_SliderGrabActive] = {.55f,.94f,.80f,1}; c[ImGuiCol_Separator] = {.13f,.16f,.20f,1};
     style.ScaleAllSizes(scale);
 }
@@ -152,7 +186,7 @@ void subtitle(const char* text) { ImGui::TextColored(kMuted, "%s", text); }
 void shortcuts(DesktopApp& app, const PlaybackSnapshot& state) {
     if(ImGui::GetIO().WantTextInput) return;
     if(ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) pickFile(app);
-    const bool active = state.state == PlaybackState::Playing || state.state == PlaybackState::Paused;
+    const bool active = state.state == PlaybackState::Playing || state.state == PlaybackState::Paused || state.state==PlaybackState::Buffering;
     if(active && ImGui::IsKeyPressed(ImGuiKey_Space)) app.player.pause(state.state != PlaybackState::Paused);
     if(active && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) app.player.seek(state.position - 10);
     if(active && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) app.player.seek(state.position + 10);
@@ -163,8 +197,8 @@ void sidebar(DesktopApp& app, float scale) {
     ImGui::BeginChild("sidebar", {190*scale, 0});
     ImGui::TextColored(kAccent, "NATIVE / PLAYER"); subtitle("本地媒体工作台");
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-    const char* pages[]{"播放器", "最近打开", "播放设置"};
-    for(int i=0;i<3;++i) if(ImGui::Selectable(pages[i], app.page == i, 0, {0,36*scale})) app.page=i;
+    const char* pages[]{"播放器", "最近打开", "播放设置", "网络播放", "账号与连接", "传输中心"};
+    for(int i=0;i<6;++i) if(ImGui::Selectable(pages[i], app.page == i, 0, {0,36*scale})) app.page=i;
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     if(accentButton("打开视频", {-1,38*scale})) pickFile(app);
     subtitle("Ctrl + O  选择文件");
@@ -173,7 +207,7 @@ void sidebar(DesktopApp& app, float scale) {
     ImGui::Text("空格      播放 / 暂停");
     ImGui::Text("左右键    跳转 10 秒");
     ImGui::Text("F11       全屏切换");
-    subtitle("FFmpeg / D3D11");
+    subtitle(app.renderer.opengl?"FFmpeg / OpenGL":"FFmpeg / D3D11");
     ImGui::EndChild();
 }
 void videoPanel(DesktopApp& app, const PlaybackSnapshot& state, const std::shared_ptr<const PlaybackFrame>& frame, float scale) {
@@ -181,12 +215,14 @@ void videoPanel(DesktopApp& app, const PlaybackSnapshot& state, const std::share
     const ImVec2 origin=ImGui::GetCursorScreenPos(), area=ImGui::GetContentRegionAvail();
     auto* draw=ImGui::GetWindowDrawList();
     draw->AddRectFilled(origin,{origin.x+area.x,origin.y+area.y},IM_COL32(8,12,18,255),12*scale);
-    if(frame && app.renderer.videoView()) {
-        const float ratio=std::min(area.x/frame->width,area.y/frame->height);
-        const ImVec2 size{frame->width*ratio,frame->height*ratio};
+    if(frame && app.renderer.texture()) {
+        const bool rotated=app.renderer.opengl && app.effects.rotation%180!=0;
+        const int width=rotated?frame->height:frame->width,height=rotated?frame->width:frame->height;
+        const float ratio=std::min(area.x/width,area.y/height);
+        const ImVec2 size{width*ratio,height*ratio};
         ImGui::SetCursorScreenPos({origin.x+(area.x-size.x)/2,origin.y+(area.y-size.y)/2});
-        ImGui::Image(reinterpret_cast<ImTextureID>(app.renderer.videoView()),size);
-        if(state.state == PlaybackState::Paused || state.state == PlaybackState::Ended || state.state == PlaybackState::Error) {
+        ImGui::Image(app.renderer.texture(),size);
+        if(state.state == PlaybackState::Paused || state.state == PlaybackState::Buffering || state.state == PlaybackState::Ended || state.state == PlaybackState::Error) {
             draw->AddRectFilled({origin.x+16*scale,origin.y+16*scale},{origin.x+118*scale,origin.y+48*scale},IM_COL32(20,31,42,235),6*scale);
             draw->AddText({origin.x+28*scale,origin.y+22*scale},IM_COL32(220,235,240,255),statusText(state.state));
         }
@@ -212,8 +248,17 @@ void videoPanel(DesktopApp& app, const PlaybackSnapshot& state, const std::share
 }
 void controls(DesktopApp& app, const PlaybackSnapshot& state, float scale) {
     ImGui::BeginChild("controls",{0,0});
-    const bool active=state.state == PlaybackState::Playing || state.state == PlaybackState::Paused;
+    const bool active=state.state == PlaybackState::Playing || state.state == PlaybackState::Paused || state.state==PlaybackState::Buffering;
     if(!app.seeking) app.seekValue=state.position;
+    const auto cache=app.cache.snapshot();
+    if(!cache.playbackUrl.empty() && state.source==cache.playbackUrl && cache.total) {
+        const auto origin=ImGui::GetCursorScreenPos();const float width=ImGui::GetContentRegionAvail().x;
+        auto* draw=ImGui::GetWindowDrawList();draw->AddRectFilled(origin,{origin.x+width,origin.y+4*scale},IM_COL32(25,34,45,255));
+        if(cache.segmentsTotal)draw->AddRectFilled(origin,{origin.x+width*float(double(cache.downloaded)/cache.total),origin.y+4*scale},IM_COL32(57,119,108,255));
+        else for(const auto& range:cache.ranges)draw->AddRectFilled({origin.x+width*float(double(range.first)/cache.total),origin.y},
+            {origin.x+width*float(double(range.second)/cache.total),origin.y+4*scale},IM_COL32(57,119,108,255));
+        ImGui::Dummy({0,5*scale});
+    }
     ImGui::BeginDisabled(!active || state.duration <= 0);
     ImGui::SetNextItemWidth(std::max(80.0f,ImGui::GetContentRegionAvail().x-140*scale));
     const double zero=0, duration=std::max(0.0,state.duration);
@@ -255,11 +300,19 @@ void settings(DesktopApp& app, float scale) {
     if(ImGui::Combo("解码器",&decoder,backends,3)) app.decoder=decoder == 1 ? VideoDecoderBackend::Ffmpeg : decoder == 2 ? VideoDecoderBackend::MediaFoundation : VideoDecoderBackend::Auto;
     ImGui::SetNextItemWidth(300*scale); ImGui::SliderFloat("画面亮度",&app.brightness,.25f,2.0f,"%.2fx");
     if(ImGui::Button("恢复默认亮度")) app.brightness=1;
+    ImGui::BeginDisabled(!app.renderer.opengl);
+    int rotation=app.effects.rotation/90;
+    const char* rotations[]{"0°","90°","180°","270°"};
+    ImGui::SetNextItemWidth(180*scale);if(ImGui::Combo("画面旋转",&rotation,rotations,4))app.effects.rotation=rotation*90;
+    ImGui::SetNextItemWidth(300*scale);ImGui::SliderFloat("画面缩放",&app.effects.zoom,.5f,3.f,"%.2fx");
+    int filter=static_cast<int>(app.effects.filter);const char* filters[]{"原色","灰度","反色"};
+    ImGui::SetNextItemWidth(180*scale);if(ImGui::Combo("画面滤镜",&filter,filters,3))app.effects.filter=static_cast<VideoFilter>(filter);
+    ImGui::EndDisabled();
     if(ImGui::Checkbox("窗口置顶",&app.topmost)) SetWindowPos(app.window,app.topmost ? HWND_TOPMOST : HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE);
     ImGui::Checkbox("显示播放技术信息",&app.showInfo);
-    ImGui::Spacing(); ImGui::Separator(); subtitle("第一层 / 本地播放器");
-    ImGui::TextWrapped("Win32 + Dear ImGui 界面，复用 D3D11 渲染和 FFmpeg / Media Foundation 播放链路。");
-    ImGui::TextWrapped("支持本地视频、拖放、暂停、跳转、音量、亮度和正常结束后重新播放。");
+    ImGui::Spacing(); ImGui::Separator(); subtitle("本地与网络播放器");
+    ImGui::TextWrapped("支持本地文件、网络点播、边下边播、本地缓存和传输恢复。");
+    if(app.showInfo)ImGui::TextWrapped("OpenGL 模式上传 YUV 平面并由着色器转换颜色；--renderer d3d11 可启动兼容渲染器。");
     ImGui::EndChild();
 }
 void recent(DesktopApp& app, float scale) {
@@ -274,6 +327,157 @@ void recent(DesktopApp& app, float scale) {
     }
     ImGui::EndChild();
 }
+std::string dataRoot() {
+    if(!overrideDataRoot.empty())return overrideDataRoot;
+    wchar_t local[32768]{};
+    const DWORD length=GetEnvironmentVariableW(L"LOCALAPPDATA",local,32768);
+    auto root=length&&length<32768?std::filesystem::path(local):std::filesystem::temp_directory_path();
+    return (root/L"NativePlayer").u8string();
+}
+const char* cacheStatus(CacheState state) {
+    switch(state) {
+        case CacheState::Preparing:return "准备下载";case CacheState::Downloading:return "下载中";
+        case CacheState::Paused:return "已暂停";case CacheState::Complete:return "已完成";
+        case CacheState::Cancelled:return "已取消，进度已保存";case CacheState::Error:return "下载失败";
+        default:return "暂无下载";
+    }
+}
+const char* uploadStatus(UploadState state) {
+    switch(state) {
+        case UploadState::Hashing:return "准备文件";case UploadState::Uploading:return "上传中";
+        case UploadState::Paused:return "已暂停";case UploadState::Reconnecting:return "等待重连";
+        case UploadState::Completed:return "已完成";case UploadState::Canceled:return "已取消";
+        case UploadState::Failed:return "上传失败";default:return "暂无上传";
+    }
+}
+void startCache(DesktopApp& app) {
+    if(!app.networkUrl[0])return;
+    app.player.stop();app.cacheAutoPlay=true;app.cachePlayWhenComplete=app.networkMode==2;
+    app.cache.start(app.networkUrl,(std::filesystem::u8path(dataRoot())/"cache").u8string());
+}
+void networkPage(DesktopApp& app,float scale) {
+    ImGui::BeginChild("network",{0,0});ImGui::Text("网络播放");
+    subtitle("输入点播地址，选择播放方式");ImGui::Separator();
+    ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##network-url","https://.../video.flv 或 .../index.m3u8",app.networkUrl,sizeof(app.networkUrl));
+    const char* modes[]{"直接网络播放","边下边播并保存缓存","下载完成后播放"};
+    ImGui::SetNextItemWidth(360*scale);ImGui::Combo("播放方式",&app.networkMode,modes,3);
+    if(app.demo) {
+        if(ImGui::Button("本地 FLV 示例"))snprintf(app.networkUrl,sizeof(app.networkUrl),"http://127.0.0.1:%u/stream.flv",app.demo->port());
+        ImGui::SameLine();if(ImGui::Button("本地 HLS 示例"))snprintf(app.networkUrl,sizeof(app.networkUrl),"http://127.0.0.1:%u/hls/index.m3u8",app.demo->port());
+    }
+    if(accentButton("开始播放",{140*scale,40*scale})) {
+        if(app.networkMode==0){app.cacheAutoPlay=false;openSource(app,app.networkUrl);}
+        else startCache(app);
+    }
+    ImGui::Spacing();
+    ImGui::TextWrapped(app.networkMode==0?"支持 FFmpeg 可读取的网络地址，包括 HLS、HTTP 和 RTMP。":
+        "支持 HTTP/HTTPS FLV 和 MPEG-TS HLS 点播。暂停或取消后保留缓存，再次打开相同地址可继续下载。");
+    const auto state=app.cache.snapshot();
+    if(state.state!=CacheState::Idle){ImGui::Spacing();ImGui::Separator();ImGui::Text("%s",cacheStatus(state.state));
+        ImGui::ProgressBar(state.total?float(double(state.downloaded)/state.total):0,{-1,0});
+        ImGui::Text("%.2f / %.2f MB",state.downloaded/1048576.,state.total/1048576.);
+        if(ImGui::Button("查看传输中心"))app.page=5;
+        if(!state.error.empty())ImGui::TextWrapped("%s",state.error.c_str());}
+    ImGui::EndChild();
+}
+void startLocalServer(DesktopApp& app) {
+    if(app.serverStart.valid() || app.localServer)return;
+    const auto root=(std::filesystem::u8path(dataRoot())/"server").u8string();const auto port=std::uint16_t(app.port);
+    app.serverError.clear();app.serverStopping=false;
+    app.serverStart=std::async(std::launch::async,[root,port]{auto server=std::make_shared<LocalServer>(root,port);
+        return server->start()?server:std::shared_ptr<LocalServer>{};});
+}
+void accountPage(DesktopApp& app,float scale) {
+    ImGui::BeginChild("account",{0,0});ImGui::Text("账号与连接");subtitle("本地演示服务 · 注册、登录与文件传输");ImGui::Separator();
+    const auto state=app.service.snapshot();
+    const char* status=state.state==ServiceState::Connected?"已连接":state.state==ServiceState::Connecting?"正在连接":state.state==ServiceState::Reconnecting?"正在重连":"未连接";
+    ImGui::TextColored(state.connected?kAccent:kMuted,"%s",status);
+    ImGui::Text("重连次数：%llu",static_cast<unsigned long long>(state.reconnectAttempts));
+    ImGui::SetNextItemWidth(280*scale);ImGui::InputText("服务地址",app.host,sizeof(app.host));
+    ImGui::SetNextItemWidth(160*scale);ImGui::InputInt("端口",&app.port);app.port=std::clamp(app.port,1,65535);
+    ImGui::BeginDisabled(app.serverStart.valid());
+    if(ImGui::Button(app.localServer?"停止本地服务":"启动本地服务")) {
+        if(app.localServer){app.serverStopping=true;auto server=std::move(app.localServer);app.serverStart=std::async(std::launch::async,[server]{server->stop();return std::shared_ptr<LocalServer>{};});}
+        else startLocalServer(app);
+    }
+    ImGui::EndDisabled();ImGui::SameLine();
+    if(ImGui::Button("连接"))app.service.connect(app.host,std::uint16_t(app.port));ImGui::SameLine();
+    if(ImGui::Button("断开"))app.service.disconnect();
+    if(!app.serverError.empty())ImGui::TextWrapped("%s",app.serverError.c_str());
+    ImGui::Spacing();ImGui::Separator();
+    if(state.authenticated){ImGui::Text("已登录：%s",state.username.c_str());if(ImGui::Button("退出账号"))app.service.logout();}
+    else {
+        ImGui::SetNextItemWidth(320*scale);ImGui::InputText("用户名",app.username,sizeof(app.username));
+        ImGui::SetNextItemWidth(320*scale);ImGui::InputText("密码",app.password,sizeof(app.password),ImGuiInputTextFlags_Password);
+        ImGui::BeginDisabled(!state.connected||state.busy);
+        if(accentButton("登录")){app.service.login(app.username,app.password);SecureZeroMemory(app.password,sizeof(app.password));}
+        ImGui::SameLine();if(ImGui::Button("注册账号")){app.service.registerAccount(app.username,app.password);SecureZeroMemory(app.password,sizeof(app.password));}
+        ImGui::EndDisabled();
+    }
+    if(state.busy)subtitle("正在处理请求…");
+    if(!state.error.empty())ImGui::TextWrapped("%s",state.error.c_str());
+    if(!state.code.empty())subtitle(state.code.c_str());
+    ImGui::EndChild();
+}
+void pickUpload(DesktopApp& app) {
+    wchar_t path[32768]{};OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner=app.window;dialog.lpstrFile=path;dialog.nMaxFile=32768;
+    dialog.lpstrTitle=L"选择上传文件";dialog.lpstrFilter=L"所有文件\0*.*\0";
+    dialog.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR|OFN_EXPLORER;
+    if(GetOpenFileNameW(&dialog))app.service.upload(utf8(path));
+}
+void transferPage(DesktopApp& app,float scale) {
+    ImGui::BeginChild("transfers",{0,0});ImGui::Text("传输中心");subtitle("下载缓存与分片上传");ImGui::Separator();
+    const auto cache=app.cache.snapshot();ImGui::Text("下载 · %s",cacheStatus(cache.state));
+    if(!cache.source.empty()){ImGui::TextWrapped("%s",cache.source.c_str());
+        ImGui::ProgressBar(cache.total?float(double(cache.downloaded)/cache.total):0,{-1,24*scale});
+        ImGui::Text("%.2f / %.2f MB · %.2f MB/s",cache.downloaded/1048576.,cache.total/1048576.,cache.bytesPerSecond/1048576.);
+        if(cache.segmentsTotal)ImGui::Text("分片：%zu / %zu",cache.segmentsComplete,cache.segmentsTotal);
+        if(cache.waitingForData)subtitle("正在获取播放所需的数据");
+        if(cache.state==CacheState::Downloading){if(ImGui::Button("暂停下载"))app.cache.pause();ImGui::SameLine();}
+        if(cache.state==CacheState::Paused){if(ImGui::Button("继续下载"))app.cache.resume();ImGui::SameLine();}
+        if(cache.state==CacheState::Paused||cache.state==CacheState::Downloading||cache.state==CacheState::Preparing){
+            if(ImGui::Button("取消并保存进度")){app.cacheAutoPlay=false;app.player.stop();app.cache.cancel();}}
+        if(cache.state==CacheState::Cancelled||cache.state==CacheState::Error){if(ImGui::Button("恢复此下载")){
+            strncpy_s(app.networkUrl,cache.source.c_str(),_TRUNCATE);startCache(app);}}
+        if(cache.state==CacheState::Complete && ImGui::Button("播放缓存"))openSource(app,cache.playbackUrl);
+        if(!cache.error.empty())ImGui::TextWrapped("%s",cache.error.c_str());
+    }else {subtitle("从网络播放页添加下载。");if(ImGui::Button("添加网络点播"))app.page=3;}
+    ImGui::Spacing();ImGui::Separator();const auto upload=app.service.uploadSnapshot();
+    ImGui::Text("上传 · %s",uploadStatus(upload.state));
+    const auto service=app.service.snapshot();ImGui::BeginDisabled(!service.authenticated);
+    if(accentButton("选择上传文件"))pickUpload(app);ImGui::EndDisabled();
+    if(!service.authenticated)subtitle("请先连接服务并登录账号。");
+    if(!upload.localPath.empty()) {
+        ImGui::TextWrapped("%s",upload.filename.c_str());ImGui::ProgressBar(float(upload.progress),{-1,24*scale});
+        ImGui::Text("%.2f / %.2f MB · %.2f MB/s",upload.uploadedBytes/1048576.,upload.totalBytes/1048576.,upload.bytesPerSecond/1048576.);
+        if(upload.state==UploadState::Uploading){if(ImGui::Button("暂停上传"))app.service.pauseUpload();ImGui::SameLine();}
+        if(upload.state==UploadState::Paused||upload.state==UploadState::Canceled||upload.state==UploadState::Failed){
+            ImGui::BeginDisabled(!service.authenticated);
+            if(ImGui::Button("继续上传")){if(upload.state==UploadState::Paused)app.service.resumeUpload();else app.service.upload(upload.localPath);}
+            ImGui::EndDisabled();ImGui::SameLine();}
+        if(upload.state==UploadState::Uploading||upload.state==UploadState::Paused||upload.state==UploadState::Hashing||upload.state==UploadState::Reconnecting){if(ImGui::Button("取消上传"))app.service.cancelUpload();}
+        if(!upload.error.empty())ImGui::TextWrapped("%s",upload.error.c_str());
+        if(!upload.serverPath.empty()){subtitle("文件已保存到服务端。");if(app.showInfo)ImGui::TextWrapped("%s",upload.serverPath.c_str());}
+    }
+    ImGui::EndChild();
+}
+void pollBackground(DesktopApp& app) {
+    if(app.serverStart.valid()&&app.serverStart.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        try {app.localServer=app.serverStart.get();if(app.localServer) {
+            const auto connection=app.service.snapshot();
+            if(connection.state==ServiceState::Disconnected || connection.host!="127.0.0.1" || connection.port!=app.localServer->port())
+                app.service.connect("127.0.0.1",app.localServer->port());
+        }
+            else if(!app.serverStopping)app.serverError="本地服务启动失败，请检查端口占用或数据目录。";}
+        catch(const std::exception& e){app.serverError=e.what();}
+    }
+    const auto status=app.cache.status();const auto& cache=status.second;const auto generation=status.first;
+    if(app.cacheAutoPlay && generation!=app.openedCacheGeneration && !cache.playbackUrl.empty() &&
+        (!app.cachePlayWhenComplete || cache.state==CacheState::Complete)) {
+        app.openedCacheGeneration=generation;openSource(app,cache.playbackUrl);
+    }
+}
 void draw(DesktopApp& app, const PlaybackSnapshot& state, const std::shared_ptr<const PlaybackFrame>& frame, float scale) {
     ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::Begin("Native Player",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoBringToFrontOnFocus);
@@ -285,6 +489,9 @@ void draw(DesktopApp& app, const PlaybackSnapshot& state, const std::shared_ptr<
     ImGui::EndChild();
     if(app.page == 1) recent(app,scale);
     else if(app.page == 2) settings(app,scale);
+    else if(app.page == 3) networkPage(app,scale);
+    else if(app.page == 4) accountPage(app,scale);
+    else if(app.page == 5) transferPage(app,scale);
     else { videoPanel(app,state,frame,scale); controls(app,state,scale); }
     ImGui::EndGroup(); ImGui::End();
     if(app.showInfo) {
@@ -302,6 +509,7 @@ void draw(DesktopApp& app, const PlaybackSnapshot& state, const std::shared_ptr<
 int runDesktopPlayer(int argc,char** argv) {
     ImGui_ImplWin32_EnableDpiAwareness();
     DesktopApp app;
+    for(int i=1;i+1<argc;++i)if(std::strcmp(argv[i],"--renderer")==0)app.renderer.opengl=std::strcmp(argv[++i],"d3d11")!=0;
     WNDCLASSEXW wc{sizeof(wc)}; wc.style=CS_CLASSDC; wc.lpfnWndProc=windowProc;
     wc.hInstance=GetModuleHandleW(nullptr); wc.hCursor=LoadCursorW(nullptr,IDC_ARROW); wc.lpszClassName=L"NativePlayerDesktop";
     if(!RegisterClassExW(&wc)) return 1;
@@ -319,17 +527,27 @@ int runDesktopPlayer(int argc,char** argv) {
     if(io.Fonts->Fonts.empty()) io.Fonts->AddFontDefault();
     const bool platform=ImGui_ImplWin32_Init(window);
     if(!platform || !app.renderer.initialize(window)) {
-        MessageBoxW(window,L"无法初始化 D3D11 或界面后端。",L"播放器启动失败",MB_ICONERROR);
+        MessageBoxW(window,L"无法初始化图形后端，可尝试 --renderer d3d11。",L"播放器启动失败",MB_ICONERROR);
         app.renderer.shutdown(); if(platform) ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext(); DestroyWindow(window); return 2;
     }
     DragAcceptFiles(window,TRUE);
     HANDLE parent=nullptr;
     std::string smokeDirectory;
+    std::string secondSmoke, demoFixtures;
     for(int i=1;i<argc;++i) {
         if(std::strcmp(argv[i],"--decoder")==0 && i+1<argc) { const auto value=std::string(argv[++i]);
           app.decoder=value == "ffmpeg" ? VideoDecoderBackend::Ffmpeg : value == "mf" ? VideoDecoderBackend::MediaFoundation : VideoDecoderBackend::Auto; }
         else if(std::strcmp(argv[i],"--parent-pid")==0 && i+1<argc) parent=OpenProcess(SYNCHRONIZE,FALSE,static_cast<DWORD>(std::strtoul(argv[++i],nullptr,10)));
         else if(std::strcmp(argv[i],"--smoke-test")==0 && i+1<argc) smokeDirectory=argv[++i];
+        else if(std::strcmp(argv[i],"--second-layer-smoke")==0 && i+1<argc) secondSmoke=argv[++i];
+        else if(std::strcmp(argv[i],"--demo-fixtures")==0 && i+1<argc) demoFixtures=argv[++i];
+        else if(std::strcmp(argv[i],"--data-root")==0 && i+1<argc) overrideDataRoot=argv[++i];
+    }
+    if(!demoFixtures.empty()) {
+        app.demo=std::make_shared<DemoHttpServer>(std::filesystem::u8path(demoFixtures));
+        if(app.demo->start())snprintf(app.networkUrl,sizeof(app.networkUrl),"http://127.0.0.1:%u/stream.flv",app.demo->port());
+        else app.serverError="演示视频服务启动失败。";
+        app.page=3;
     }
     for(int i=1;i<argc-1;++i) if(std::strcmp(argv[i],"--source")==0) { openSource(app,argv[i+1]); break; }
     ShowWindow(window,SW_SHOW); UpdateWindow(window);
@@ -338,6 +556,18 @@ int runDesktopPlayer(int argc,char** argv) {
     ULONGLONG stageStart=smokeStart;
     int smokeStage=0, smokeResult=0;
     std::uint64_t smokePreviewSerial=0;
+    int secondStage=0;
+    ULONGLONG secondStageStart=smokeStart;
+    std::uint16_t smokeServicePort=0;
+    auto secondCapture=[&](const char* name) {
+        const auto path=std::filesystem::u8path(secondSmoke)/(std::string(name)+".png");
+        if(!app.renderer.saveScreenshot(path.c_str()))smokeResult=1;
+    };
+    if(!secondSmoke.empty()) {
+        std::filesystem::create_directories(std::filesystem::u8path(secondSmoke));
+        overrideDataRoot=(std::filesystem::absolute(std::filesystem::u8path(secondSmoke))/"data").u8string();
+        app.port=0;app.page=3;
+    }
     if(!smokeDirectory.empty()) std::filesystem::create_directories(std::filesystem::u8path(smokeDirectory));
     auto smokeCapture=[&](const char* name) {
         const auto path=std::filesystem::u8path(smokeDirectory)/(std::string(name)+".png");
@@ -347,12 +577,60 @@ int runDesktopPlayer(int argc,char** argv) {
         MSG message{};
         while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) { if(message.message == WM_QUIT) app.quitting=true; TranslateMessage(&message); DispatchMessageW(&message); }
         if(app.quitting || (parent && WaitForSingleObject(parent,0)==WAIT_OBJECT_0)) break;
+        pollBackground(app);
         if(app.minimized) { Sleep(20); continue; }
         const auto renderedState=app.player.snapshot();
         const auto renderedFrame=app.player.frame();
-        if(!app.renderer.updateVideo(renderedFrame,app.brightness)) { app.renderError="视频纹理上传失败，请停止后重新打开。"; app.player.stop(); }
-        ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+        app.effects.brightness=app.brightness;
+        if(!app.renderer.updateVideo(renderedFrame,app.effects)) { app.renderError="视频纹理上传失败，请停止后重新打开。"; app.player.stop(); }
+        app.renderer.newFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         draw(app,renderedState,renderedFrame,scale); ImGui::Render(); app.renderer.begin(); app.renderer.present();
+        if(!secondSmoke.empty()) {
+            const auto cache=app.cache.snapshot();const auto service=app.service.snapshot();const auto upload=app.service.uploadSnapshot();
+            auto nextStage=[&]{++secondStage;secondStageStart=GetTickCount64();};
+            if(secondStage==0){secondCapture("network");startCache(app);nextStage();}
+            else if(secondStage==1 && renderedState.state==PlaybackState::Playing && renderedFrame && cache.downloaded<cache.total) {
+                secondCapture("progressive-playing");app.player.pause(true);app.cache.pause();app.page=5;nextStage();
+            } else if(secondStage==2 && cache.state==CacheState::Paused && renderedState.state==PlaybackState::Paused) {
+                secondCapture("download-paused");app.cacheAutoPlay=false;app.player.stop();app.cache.cancel();nextStage();
+            } else if(secondStage==3 && cache.state==CacheState::Cancelled && renderedState.state==PlaybackState::Idle) {
+                secondCapture("download-cancelled");startCache(app);nextStage();
+            } else if(secondStage==4 && renderedState.state==PlaybackState::Playing && renderedFrame) {
+                secondCapture("download-resumed");app.player.pause(true);app.page=4;startLocalServer(app);nextStage();
+            } else if(secondStage==5 && service.connected && app.localServer) {
+                smokeServicePort=app.localServer->port();app.port=smokeServicePort;
+                snprintf(app.username,sizeof(app.username),"demo_%lu",GetCurrentProcessId());
+                app.service.registerAccount(app.username,"Demo-password-123!");nextStage();
+            } else if(secondStage==6 && !service.busy && service.code=="OK") {
+                app.service.login(app.username,"Demo-password-123!");nextStage();
+            } else if(secondStage==7 && service.authenticated && GetTickCount64()-secondStageStart>150) {
+                secondCapture("account");app.page=5;app.service.upload((std::filesystem::u8path(demoFixtures)/"stream.flv").u8string());nextStage();
+            } else if(secondStage==8 && upload.state==UploadState::Uploading && upload.uploadedBytes>0 && upload.uploadedBytes<upload.totalBytes) {
+                app.service.pauseUpload();nextStage();
+            } else if(secondStage==9 && upload.state==UploadState::Paused) {
+                secondCapture("upload-paused");app.service.resumeUpload();nextStage();
+            } else if(secondStage==10 && upload.state==UploadState::Completed && cache.state==CacheState::Complete) {
+                secondCapture("transfers-complete");app.page=4;
+                app.serverStopping=true;auto server=std::move(app.localServer);
+                app.serverStart=std::async(std::launch::async,[server]{server->stop();return std::shared_ptr<LocalServer>{};});nextStage();
+            } else if(secondStage==11 && !service.connected && !app.serverStart.valid()) {
+                secondCapture("reconnecting");app.port=smokeServicePort;startLocalServer(app);nextStage();
+            } else if(secondStage==12 && service.connected && service.authenticated && GetTickCount64()-secondStageStart>150) {
+                secondCapture("session-restored");app.page=3;app.networkMode=2;
+                snprintf(app.networkUrl,sizeof(app.networkUrl),"http://127.0.0.1:%u/hls/index.m3u8",app.demo->port());
+                startCache(app);nextStage();
+            } else if(secondStage==13 && cache.state==CacheState::Downloading && cache.segmentsTotal==8 && renderedState.state==PlaybackState::Idle) {
+                secondCapture("hls-download-first");nextStage();
+            } else if(secondStage==14 && cache.state==CacheState::Complete && renderedState.state==PlaybackState::Playing && renderedFrame && renderedState.source==cache.playbackUrl) {
+                secondCapture("hls-complete-playing");
+                std::ofstream(std::filesystem::u8path(secondSmoke)/"result.json")<<nlohmann::json{{"passed",smokeResult==0},{"stages",secondStage+1},{"cachedBytes",cache.downloaded},{"segments",cache.segmentsTotal},{"uploadedBytes",upload.uploadedBytes},{"authenticated",service.authenticated}}.dump(2);
+                app.quitting=true;
+            }
+            if(GetTickCount64()-smokeStart>90000 || GetTickCount64()-secondStageStart>30000) {
+                secondCapture("timeout");smokeResult=1;app.quitting=true;
+                std::ofstream(std::filesystem::u8path(secondSmoke)/"result.json")<<nlohmann::json{{"passed",false},{"stage",secondStage},{"playback",statusText(renderedState.state)},{"cache",cacheStatus(cache.state)},{"cacheError",cache.error},{"serviceError",service.error},{"upload",uploadStatus(upload.state)}}.dump(2);
+            }
+        }
         if(!smokeDirectory.empty()) {
             // Evaluate the snapshot and frame actually drawn, rather than a
             // newer worker state whose texture has not reached this window yet.
