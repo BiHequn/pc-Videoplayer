@@ -2,6 +2,7 @@
 
 #include<cstddef>
 #include<cstdint>
+#include<array>
 #include<vector>
 
 enum class VideoCodec
@@ -17,14 +18,20 @@ struct VideoTimeBase
 	int denominator = 1;
 };
 
+enum class VideoPixelFormat { Bgra, Yuv420p };
+enum class VideoColorRange { Unspecified, Limited, Full };
+enum class VideoColorSpace { Unspecified, Bt601, Bt709, Bt2020 };
+
 struct VideoDecoderConfig
 {
 	VideoCodec codec = VideoCodec::Unknown;
+	int ffmpegCodecId = 0;
 	int width = 0;
 	int height = 0;
 	VideoTimeBase timeBase;
 	//H.264的SPS/PPS 或 H.265的VPS/SPS/PPS
 	std::vector<std::uint8_t> extraData;
+	bool nativeYuv = false;
 };
 
 struct EncodedVideoPacket
@@ -51,6 +58,13 @@ struct DecodedVideoFrame
 	int stride = 0;
 
 	double ptsSeconds = 0.0;
+	VideoPixelFormat pixelFormat = VideoPixelFormat::Bgra;
+	// Borrowed views valid until the next receiveFrame, flush or close.
+	// data/stride alias plane 0; YUV chroma size is ceil(width/2), ceil(height/2).
+	std::array<const unsigned char*, 3> planes{};
+	std::array<int, 3> strides{};
+	VideoColorRange colorRange = VideoColorRange::Unspecified;
+	VideoColorSpace colorSpace = VideoColorSpace::Unspecified;
 };
 
 enum class VideoDecoderResult

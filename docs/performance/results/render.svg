@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" role="img">
+<title>Update through GPU completion p95</title><rect width='900' height='420' fill='#f6f8fc'/><g font-family='Segoe UI,Arial,sans-serif' fill='#1c2638'>
+<text x='35' y='30' font-size='20'>Update through GPU completion p95</text><text x='35' y='53' font-size='12'>Bars: median; dots: individual runs. Unit: ms</text>
+<line x1='75' x2='860' y1='335' y2='335' stroke='#dbe2ed'/><text x='68' y='339' text-anchor='end' font-size='12'>0</text>
+<line x1='75' x2='860' y1='266.25' y2='266.25' stroke='#dbe2ed'/><text x='68' y='270.25' text-anchor='end' font-size='12'>4.31</text>
+<line x1='75' x2='860' y1='197.5' y2='197.5' stroke='#dbe2ed'/><text x='68' y='201.5' text-anchor='end' font-size='12'>8.62</text>
+<line x1='75' x2='860' y1='128.75' y2='128.75' stroke='#dbe2ed'/><text x='68' y='132.75' text-anchor='end' font-size='12'>12.931</text>
+<line x1='75' x2='860' y1='60' y2='60' stroke='#dbe2ed'/><text x='68' y='64' text-anchor='end' font-size='12'>17.241</text>
+<text x='205' y='359' text-anchor='middle' font-size='14'>720p (1280×720)</text>
+<rect x='147' y='277.252' width='50' height='57.748' fill='#2678c9'/><text x='172' y='267.252' text-anchor='middle' font-size='12'>3.62</text>
+<circle cx='157' cy='295.648' r='3' fill='#1c2638'><title>native-yuv run 1: 2.467 ms</title></circle>
+<circle cx='166' cy='277.252' r='3' fill='#1c2638'><title>native-yuv run 2: 3.62 ms</title></circle>
+<circle cx='175' cy='268.889' r='3' fill='#1c2638'><title>native-yuv run 3: 4.145 ms</title></circle>
+<rect x='212' y='273.778' width='50' height='61.222' fill='#dd8640'/><text x='237' y='263.778' text-anchor='middle' font-size='12'>3.838</text>
+<circle cx='222' cy='273.778' r='3' fill='#1c2638'><title>bgra run 1: 3.838 ms</title></circle>
+<circle cx='231' cy='282.947' r='3' fill='#1c2638'><title>bgra run 2: 3.263 ms</title></circle>
+<circle cx='240' cy='255.362' r='3' fill='#1c2638'><title>bgra run 3: 4.993 ms</title></circle>
+<text x='465' y='359' text-anchor='middle' font-size='14'>1080p (1920×1080)</text>
+<rect x='407' y='254.765' width='50' height='80.235' fill='#2678c9'/><text x='432' y='244.765' text-anchor='middle' font-size='12'>5.03</text>
+<circle cx='417' cy='254.765' r='3' fill='#1c2638'><title>native-yuv run 1: 5.03 ms</title></circle>
+<circle cx='426' cy='274.601' r='3' fill='#1c2638'><title>native-yuv run 2: 3.787 ms</title></circle>
+<circle cx='435' cy='252.888' r='3' fill='#1c2638'><title>native-yuv run 3: 5.148 ms</title></circle>
+<rect x='472' y='250.157' width='50' height='84.843' fill='#dd8640'/><text x='497' y='240.157' text-anchor='middle' font-size='12'>5.319</text>
+<circle cx='482' cy='249.265' r='3' fill='#1c2638'><title>bgra run 1: 5.375 ms</title></circle>
+<circle cx='491' cy='256.858' r='3' fill='#1c2638'><title>bgra run 2: 4.899 ms</title></circle>
+<circle cx='500' cy='250.157' r='3' fill='#1c2638'><title>bgra run 3: 5.319 ms</title></circle>
+<text x='725' y='359' text-anchor='middle' font-size='14'>4k (3840×2160)</text>
+<rect x='667' y='163.14' width='50' height='171.86' fill='#2678c9'/><text x='692' y='153.14' text-anchor='middle' font-size='12'>10.775</text>
+<circle cx='677' cy='163.14' r='3' fill='#1c2638'><title>native-yuv run 1: 10.775 ms</title></circle>
+<circle cx='686' cy='195.762' r='3' fill='#1c2638'><title>native-yuv run 2: 8.729 ms</title></circle>
+<circle cx='695' cy='138.759' r='3' fill='#1c2638'><title>native-yuv run 3: 12.303 ms</title></circle>
+<rect x='732' y='104.612' width='50' height='230.388' fill='#dd8640'/><text x='757' y='94.612' text-anchor='middle' font-size='12'>14.444</text>
+<circle cx='742' cy='134.038' r='3' fill='#1c2638'><title>bgra run 1: 12.599 ms</title></circle>
+<circle cx='751' cy='104.612' r='3' fill='#1c2638'><title>bgra run 2: 14.444 ms</title></circle>
+<circle cx='760' cy='60' r='3' fill='#1c2638'><title>bgra run 3: 17.241 ms</title></circle>
+<rect x='285' y='385' width='14' height='14' fill='#2678c9'/><text x='307' y='397' font-size='13'>native YUV</text><rect x='460' y='385' width='14' height='14' fill='#dd8640'/><text x='482' y='397' font-size='13'>CPU BGRA</text></g></svg>

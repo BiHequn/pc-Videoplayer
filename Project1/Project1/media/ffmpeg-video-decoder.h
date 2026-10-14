@@ -20,10 +20,13 @@ public:
 
 private:
     bool convertFrameToBgra(const AVFrame* source, DecodedVideoFrame* output);
+    bool exposeFrameAsYuv(const AVFrame* source, DecodedVideoFrame* output);
     AVCodecContext* codecContext_ = nullptr;
     AVFrame* decodedFrame_ = nullptr;
+    AVFrame* nativeFrame_ = nullptr;
     SwsContext* scaleContext_ = nullptr;
 
     std::vector<unsigned char> bgraBuffer_;
     VideoTimeBase timeBase_;
+    bool nativeYuv_ = false;
 };

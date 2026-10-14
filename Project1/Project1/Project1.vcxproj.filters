@@ -16,6 +16,15 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="app\desktop-player.cpp">
+      <Filter>app</Filter>
+    </ClCompile>
+    <ClCompile Include="app\playback-session.cpp">
+      <Filter>app</Filter>
+    </ClCompile>
+    <ClCompile Include="render\desktop-renderer.cpp">
+      <Filter>render</Filter>
+    </ClCompile>
     <ClCompile Include="app\app-runtime.cpp">
       <Filter>app</Filter>
     </ClCompile>
@@ -69,6 +78,15 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="app\desktop-player.h">
+      <Filter>app</Filter>
+    </ClInclude>
+    <ClInclude Include="app\playback-session.h">
+      <Filter>app</Filter>
+    </ClInclude>
+    <ClInclude Include="render\desktop-renderer.h">
+      <Filter>render</Filter>
+    </ClInclude>
     <ClInclude Include="app\app-runtime.h">
       <Filter>app</Filter>
     </ClInclude>
@@ -120,5 +138,33 @@
     <ClInclude Include="media\vod-downloader.h">
       <Filter>media</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="app\cache-controller.cpp" />
+    <ClCompile Include="app\desktop-state.cpp" />
+    <ClCompile Include="app\demo-http-server.cpp" />
+    <ClCompile Include="media\loopback-http.cpp" />
+    <ClCompile Include="media\progressive-cache.cpp" />
+    <ClCompile Include="media\video-frame-copy.cpp" />
+    <ClCompile Include="render\opengl-renderer.cpp" />
+    <ClCompile Include="service\crypto.cpp" />
+    <ClCompile Include="service\protocol.cpp" />
+    <ClCompile Include="service\local-server.cpp" />
+    <ClCompile Include="service\service-client.cpp" />
+    <ClCompile Include="..\..\third_party\imgui\backends\imgui_impl_opengl3.cpp" />
+    <ClInclude Include="app\cache-controller.h" />
+    <ClInclude Include="app\desktop-state.h" />
+    <ClInclude Include="app\demo-http-server.h" />
+    <ClInclude Include="media\loopback-http.h" />
+    <ClInclude Include="media\progressive-cache.h" />
+    <ClInclude Include="media\video-frame-copy.h" />
+    <ClInclude Include="render\opengl-renderer.h" />
+    <ClInclude Include="service\crypto.h" />
+    <ClInclude Include="service\protocol.h" />
+    <ClInclude Include="service\local-server.h" />
+    <ClInclude Include="service\service-client.h" />
+    <ClInclude Include="service\service-types.h" />
+    <ClInclude Include="..\..\third_party\imgui\backends\imgui_impl_opengl3.h" />
+    <ClInclude Include="..\..\third_party\imgui\backends\imgui_impl_opengl3_loader.h" />
   </ItemGroup>
 </Project>

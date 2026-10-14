@@ -3,10 +3,16 @@
 #include<mmsystem.h>
 #include"media-packet-queue.h"
 #include"video-frame-queue.h"
+#include "video-frame-copy.h"
 
 #include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <chrono>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include<vector>
@@ -45,6 +51,15 @@ static std::atomic<double> g_audioStartPtsSeconds(-1.0);
 static int g_audioPtsLogCount = 0;
 
 static HWAVEOUT g_audioOutput = nullptr;
+static HANDLE g_audioCompletionEvent = nullptr;
+static std::atomic<std::uint64_t> g_audioCompletions{0};
+static void CALLBACK audioCompletion(HWAVEOUT,UINT message,DWORD_PTR instance,DWORD_PTR,DWORD_PTR) {
+    if(message==WOM_DONE) {
+        ++g_audioCompletions;
+        // WaveOut callbacks must not call device functions or take playback locks.
+        if(instance)SetEvent(reinterpret_cast<HANDLE>(instance));
+    }
+}
 
 static const int kAudioBufferCount = 4;
 static std::vector<unsigned char>
@@ -52,6 +67,11 @@ static std::vector<unsigned char>
 static WAVEHDR
 g_audioHeaders[kAudioBufferCount] = {};
 static int g_nextAudioBuffer = 0;
+static DWORD g_audioVolumeBeforeMute = 0xFFFFFFFF;
+static DWORD g_audioDeviceOriginalVolume = 0xFFFFFFFF;
+static bool g_audioMutedForRate = false;
+static std::mutex g_audioOutputMutex;
+static float g_audioVolume = 1.0f;
 
 //增加线程处理队列
 static MediaPacketQueue g_audioPacketQueue;
@@ -68,9 +88,26 @@ static std::atomic<bool> g_outputStarted(false);
 static std::atomic<bool> g_videoDecodeFinished(false);
 static std::atomic<bool> g_audioDecodeFinished(true);
 static std::atomic<bool> g_abortRequested(false);
+static std::mutex g_cancellationProbeMutex;
+static bool (*g_cancellationProbe)(void*) = nullptr;
+static void* g_cancellationUser = nullptr;
+static std::atomic<ULONGLONG> g_previewDeadlineMs(0);
+// Written only after joining decoders, then published by thread creation.
+static double g_seekTargetSeconds = -1.0;
+// Only the video decoder writes this; the worker reads it after the release/
+// acquire publication through g_videoDecodeFinished, and resets after joining.
+static QueuedVideoFrame g_previewTailFrame;
 static std::atomic<PlaybackEndReason>
     g_playbackEndReason(PlaybackEndReason::None);
 static QueuedVideoFrame g_displayFrame;
+static std::atomic<double> g_playbackRate(1.0);
+static double g_videoClockSeconds = 0.0;
+static ULONGLONG g_videoClockLastTickMs = 0;
+static bool g_videoClockValid = false;
+static double g_durationSeconds = 0.0;
+static VideoDecoderBackend g_effectiveBackend = VideoDecoderBackend::Auto;
+static bool g_nativeYuvOutput = false;
+static std::atomic<bool> g_buffering(false);
 
 static const size_t kAudioPacketQueueSize = 32;
 static const size_t kVideoPacketQueueSize = 16;
@@ -78,7 +115,8 @@ static const size_t kVideoFrameQueueSize = 6;
 
 static void audioDecodeThreadMain();
 static void videoDecodeThreadMain();
-static bool startPlaybackThreads();
+static bool startPlaybackThreads(bool paused = false, bool outputStarted = false);
+static void applyFfmpegVolume();
 
 static std::unique_ptr<IVideoDecoder> g_videoDecoder;
 static AVBSFContext* g_videoBsf = nullptr;
@@ -92,9 +130,55 @@ static void printFfmpegError(const char* operation, int errorCode)
   std::cerr << operation<< " failed: "<< errorText<< std::endl;
 }
 
+static bool externalCancellationRequested()
+{
+    std::lock_guard<std::mutex> lock(g_cancellationProbeMutex);
+    return g_cancellationProbe && g_cancellationProbe(g_cancellationUser);
+}
+
+static bool ffmpegCancellationRequested()
+{
+    const ULONGLONG deadline = g_previewDeadlineMs.load();
+    return g_abortRequested.load() || externalCancellationRequested() ||
+        (deadline != 0 && GetTickCount64() >= deadline);
+}
+
 static int ffmpegInterruptCallback(void*)
 {
-    return g_abortRequested.load() ? 1 : 0;
+    return ffmpegCancellationRequested() ? 1 : 0;
+}
+
+void setFfmpegCancellationProbe(bool (*probe)(void*), void* user)
+{
+    std::lock_guard<std::mutex> lock(g_cancellationProbeMutex);
+    g_cancellationProbe = probe;
+    g_cancellationUser = user;
+}
+
+static bool queueAudioPacket(const AVPacket* packet)
+{
+    // A rate change must also release a demux push already waiting for space.
+    AVPacket* copy = av_packet_clone(packet);
+    if (!copy)
+        return false;
+    std::unique_lock<std::mutex> lock(g_audioPacketQueue.mutex);
+    while (!g_audioPacketQueue.stopped && g_playbackRunning.load() &&
+        !ffmpegCancellationRequested() && g_playbackRate.load() == 1.0 &&
+        g_outputStarted.load() && g_audioPacketQueue.packets.size() >= kAudioPacketQueueSize)
+    {
+        g_audioPacketQueue.condition.wait_for(lock, std::chrono::milliseconds(5));
+    }
+    const bool running = !g_audioPacketQueue.stopped && g_playbackRunning.load() &&
+        !ffmpegCancellationRequested();
+    if (running && g_playbackRate.load() == 1.0)
+    {
+        g_audioPacketQueue.packets.push_back(copy);
+        copy = nullptr;
+    }
+    lock.unlock();
+    av_packet_free(&copy);
+    g_audioPacketQueue.condition.notify_all();
+    return running;
 }
 //编码格式转换
 static VideoCodec toVideoCodec(AVCodecID codecId)
@@ -183,7 +267,7 @@ static void demuxThreadMain()
     }
 
     // 只有解封装线程可以调用 av_read_frame。
-    while (g_playbackRunning.load())
+    while (g_playbackRunning.load() && !ffmpegCancellationRequested())
     {
         if (g_playbackPaused.load())
         {
@@ -202,7 +286,7 @@ static void demuxThreadMain()
                 g_playbackEndReason.store(
                     PlaybackEndReason::Completed);
             }
-            else if (!g_abortRequested.load())
+            else if (!ffmpegCancellationRequested())
             {
                 printFfmpegError(
                     "av_read_frame",
@@ -219,15 +303,8 @@ static void demuxThreadMain()
 
         if (packet->stream_index == g_audioStreamIndex)
         {
-            // 首帧显示前音频线程还没启动输出，暂时不限制队列长度。
-            size_t maxPacketCount =
-                g_outputStarted.load() ?
-                kAudioPacketQueueSize : 0;
-
-            pushed = pushMediaPacket(
-                &g_audioPacketQueue,
-                packet,
-                maxPacketCount);
+            if (g_playbackRate.load() == 1.0)
+                pushed = queueAudioPacket(packet);
         }
         else if (packet->stream_index == g_videoStreamIndex)
         {
@@ -266,8 +343,10 @@ bool openFfmpegVideo(
   }
 
   closeFfmpegVideo();
-  g_videoDecoder = std::move(videoDecoder);
   g_abortRequested.store(false);
+  if (ffmpegCancellationRequested())
+      return false;
+  g_videoDecoder = std::move(videoDecoder);
   g_playbackEndReason.store(
       PlaybackEndReason::None);
 
@@ -284,6 +363,8 @@ bool openFfmpegVideo(
   g_formatContext->interrupt_callback.callback =
       ffmpegInterruptCallback;
   g_formatContext->interrupt_callback.opaque = nullptr;
+  const bool networkSource=std::strstr(source, "://")!=nullptr;
+  if(networkSource){g_formatContext->probesize=256*1024;g_formatContext->max_analyze_duration=500000;}
 
   // FFmpeg 自动识别本地文件或网络 URL 的封装格式。
   int result = avformat_open_input(
@@ -292,7 +373,7 @@ bool openFfmpegVideo(
     nullptr,
     nullptr);
 
-  if (result < 0)
+  if (result < 0 || ffmpegCancellationRequested())
   {
     printFfmpegError("avformat_open_input", result);
     closeFfmpegVideo();
@@ -304,7 +385,7 @@ bool openFfmpegVideo(
     g_formatContext,
     nullptr);
 
-  if (result < 0)
+  if (result < 0 || ffmpegCancellationRequested())
   {
     printFfmpegError("avformat_find_stream_info", result);
     closeFfmpegVideo();
@@ -333,12 +414,28 @@ bool openFfmpegVideo(
   AVStream* videoStream =
     g_formatContext->streams[g_videoStreamIndex];
 
+  if (g_formatContext->duration != AV_NOPTS_VALUE &&
+      g_formatContext->duration > 0)
+  {
+      g_durationSeconds =
+          static_cast<double>(g_formatContext->duration) / AV_TIME_BASE;
+  }
+  else if (videoStream->duration != AV_NOPTS_VALUE &&
+           videoStream->duration > 0 && videoStream->time_base.num > 0 &&
+           videoStream->time_base.den > 0)
+  {
+      g_durationSeconds = videoStream->duration * av_q2d(videoStream->time_base);
+  }
+
   AVCodecParameters* codecParameters =
       videoStream->codecpar;
 
   VideoDecoderConfig decoderConfig;
+  decoderConfig.nativeYuv = g_nativeYuvOutput;
   decoderConfig.codec =
       toVideoCodec(codecParameters->codec_id);
+  decoderConfig.ffmpegCodecId =
+      static_cast<int>(codecParameters->codec_id);
   decoderConfig.width = codecParameters->width;
   decoderConfig.height = codecParameters->height;
   decoderConfig.timeBase.numerator =
@@ -429,7 +526,19 @@ bool openFfmpegVideo(
       std::cerr
           << "Using FFmpeg software decoder fallback."
           << std::endl;
+      activeBackend = VideoDecoderBackend::Ffmpeg;
   }
+
+  // Auto's factory prefers MF when it is compiled in; otherwise it is software.
+  if (activeBackend == VideoDecoderBackend::Auto)
+  {
+#if NP_ENABLE_MF_VIDEO_DECODER
+      activeBackend = VideoDecoderBackend::MediaFoundation;
+#else
+      activeBackend = VideoDecoderBackend::Ffmpeg;
+#endif
+  }
+  g_effectiveBackend = activeBackend;
 
   std::cerr
       << "Video decoder interface initialized: "
@@ -571,13 +680,15 @@ bool openFfmpegVideo(
           audioFormat.nSamplesPerSec *
           audioFormat.nBlockAlign;
 
-      MMRESULT waveResult = waveOutOpen(
+      g_audioCompletions=0;
+      g_audioCompletionEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+      MMRESULT waveResult = g_audioCompletionEvent ? waveOutOpen(
           &g_audioOutput,
           WAVE_MAPPER,
           &audioFormat,
-          0,
-          0,
-          CALLBACK_NULL);
+          reinterpret_cast<DWORD_PTR>(&audioCompletion),
+          reinterpret_cast<DWORD_PTR>(g_audioCompletionEvent),
+          CALLBACK_FUNCTION) : MMSYSERR_NOMEM;
 
       if (waveResult != MMSYSERR_NOERROR)
       {
@@ -587,6 +698,12 @@ bool openFfmpegVideo(
 
           // 音频设备打开失败时，仍然允许继续播放画面。
           g_audioOutput = nullptr;
+          if(g_audioCompletionEvent){CloseHandle(g_audioCompletionEvent);g_audioCompletionEvent=nullptr;}
+      }
+      else
+      {
+          waveOutGetVolume(g_audioOutput, &g_audioDeviceOriginalVolume);
+          applyFfmpegVolume();
       }
   }
   else
@@ -605,7 +722,7 @@ bool openFfmpegVideo(
       << codecParameters->height
       << std::endl;
 
-  if (!startPlaybackThreads())
+  if (ffmpegCancellationRequested() || !startPlaybackThreads())
   {
       closeFfmpegVideo();
       return false;
@@ -662,6 +779,7 @@ static void decodeAudioPacket(const AVPacket* packet, AVFrame* frame)
         g_audioPcmBuffer.data()
     };
 
+    const int64_t resampleDelay = swr_get_delay(g_audioResampleContext, g_audioSampleRate);
     int convertedSamples = swr_convert(
         g_audioResampleContext,
         outputData,
@@ -683,11 +801,34 @@ static void decodeAudioPacket(const AVPacket* packet, AVFrame* frame)
                 frame->best_effort_timestamp *
                 av_q2d(audioStream->time_base);
 
-            if (g_audioStartPtsSeconds.load() < 0.0)
-            {
-                g_audioStartPtsSeconds.store(audioPtsSeconds);
-            }
+            audioPtsSeconds -= static_cast<double>(resampleDelay) / g_audioSampleRate;
         }
+
+        int skippedSamples = 0;
+        if (g_seekTargetSeconds >= 0.0)
+        {
+            // Unknown timestamps cannot safely contribute pre-target PCM.
+            if (audioPtsSeconds < 0.0)
+            {
+                av_frame_unref(frame);
+                continue;
+            }
+            const double skip = std::ceil((g_seekTargetSeconds - audioPtsSeconds) *
+                g_audioSampleRate);
+            if (skip >= convertedSamples)
+            {
+                av_frame_unref(frame);
+                continue;
+            }
+            skippedSamples = static_cast<int>((std::max)(0.0, skip));
+            audioPtsSeconds += static_cast<double>(skippedSamples) / g_audioSampleRate;
+        }
+        const size_t skippedBytes = static_cast<size_t>(skippedSamples) * g_audioChannels * 2;
+        const size_t retainedBytes = static_cast<size_t>(convertedSamples - skippedSamples) *
+            g_audioChannels * 2;
+        if (skippedBytes != 0)
+            std::memmove(g_audioPcmBuffer.data(), g_audioPcmBuffer.data() + skippedBytes,
+                retainedBytes);
 
         if (g_audioPtsLogCount < 10)
         {
@@ -700,29 +841,33 @@ static void decodeAudioPacket(const AVPacket* packet, AVFrame* frame)
             ++g_audioPtsLogCount;
         }
 
-        g_audioPcmBuffer.resize(
-            static_cast<size_t>(convertedSamples) *
-            g_audioChannels *
-            2);
+        g_audioPcmBuffer.resize(retainedBytes);
 
         if (g_audioOutput)
         {
+            std::unique_lock<std::mutex> outputLock(g_audioOutputMutex);
             WAVEHDR& audioHeader =
                 g_audioHeaders[g_nextAudioBuffer];
 
-            // 缓冲区仍在播放时等待，防止覆盖正在播放的数据。
-            if ((audioHeader.dwFlags & WHDR_PREPARED) != 0 &&
-                (audioHeader.dwFlags & WHDR_DONE) == 0)
+            // Release the control lock while waiting; muted audio must never
+            // wait on stale WaveOut headers or submit newly decoded PCM.
+            while (g_playbackRunning.load() && !ffmpegCancellationRequested() &&
+                g_playbackRate.load() == 1.0 &&
+                (!g_outputStarted.load() || g_playbackPaused.load() ||
+                 ((audioHeader.dwFlags & WHDR_PREPARED) != 0 &&
+                  (audioHeader.dwFlags & WHDR_DONE) == 0)))
             {
-                while ((audioHeader.dwFlags & WHDR_DONE) == 0)
-                {
-                    if (!g_playbackRunning.load())
-                    {
-                        av_frame_unref(frame);
-                        return;
-                    }
-                    Sleep(1);
-                }
+                const bool awaitingCompletion=(audioHeader.dwFlags&WHDR_PREPARED)!=0 && (audioHeader.dwFlags&WHDR_DONE)==0;
+                outputLock.unlock();
+                if(awaitingCompletion&&g_audioCompletionEvent)WaitForSingleObject(g_audioCompletionEvent,10);
+                else Sleep(1);
+                outputLock.lock();
+            }
+            if (!g_playbackRunning.load() || ffmpegCancellationRequested() ||
+                g_playbackRate.load() != 1.0 || g_audioMutedForRate)
+            {
+                av_frame_unref(frame);
+                return;
             }
 
             // 释放已经播放完成的旧 Header。
@@ -766,6 +911,8 @@ static void decodeAudioPacket(const AVPacket* packet, AVFrame* frame)
 
                 if (writeResult == MMSYSERR_NOERROR)
                 {
+                    if (g_audioStartPtsSeconds.load() < 0.0 && audioPtsSeconds >= 0.0)
+                        g_audioStartPtsSeconds.store(audioPtsSeconds);
                     g_nextAudioBuffer =
                         (g_nextAudioBuffer + 1) %
                         kAudioBufferCount;
@@ -815,9 +962,9 @@ static void audioDecodeThreadMain()
         stopVideoFrameQueue(&g_videoFrameQueue);
         return;
     }
-    while (g_playbackRunning.load())
+    while (g_playbackRunning.load() && !ffmpegCancellationRequested())
     {
-        if (!g_outputStarted.load())
+        if (!g_outputStarted.load() && g_playbackRate.load() == 1.0)
         {
             Sleep(1);
             continue;
@@ -837,14 +984,16 @@ static void audioDecodeThreadMain()
                 decodeAudioPacket(nullptr, frame);
             break;
         }
-        decodeAudioPacket(packet, frame);
+        if (g_playbackRate.load() == 1.0)
+            decodeAudioPacket(packet, frame);
         //队列返回的是独立clone的packet,消费完成后由音频线程负责释放
         av_packet_free(&packet);
     }
     av_frame_free(&frame);
 
     // 文件结束时让已经交给 WaveOut 的尾部音频播完。
-    while (g_playbackRunning.load() && g_audioOutput)
+    while (g_playbackRunning.load() && !ffmpegCancellationRequested() &&
+        g_audioOutput && g_playbackRate.load() == 1.0)
     {
         bool allDone = true;
 
@@ -875,9 +1024,21 @@ static bool pushInterfaceVideoFrame(const DecodedVideoFrame& frame)
     if (!frame.data ||
         frame.width <= 0 ||
         frame.height <= 0 ||
-        frame.stride <= 0)
+        frame.stride == 0)
     {
         return false;
+    }
+
+    if (g_seekTargetSeconds >= 0.0 &&
+        (!std::isfinite(frame.ptsSeconds) || frame.ptsSeconds < g_seekTargetSeconds))
+    {
+        if (g_previewDeadlineMs.load() != 0 && std::isfinite(frame.ptsSeconds) &&
+            frame.ptsSeconds >= 0.0 &&
+            (g_previewTailFrame.pixels.empty() || frame.ptsSeconds > g_previewTailFrame.ptsSeconds))
+        {
+            if (!copyVideoFrame(frame, &g_previewTailFrame)) return false;
+        }
+        return true;
     }
 
     if (g_videoPtsLogCount < 10)
@@ -891,14 +1052,7 @@ static bool pushInterfaceVideoFrame(const DecodedVideoFrame& frame)
         ++g_videoPtsLogCount;
     }
 
-    return pushVideoFrame(
-        &g_videoFrameQueue,
-        frame.data,
-        frame.width,
-        frame.height,
-        frame.stride,
-        frame.ptsSeconds,
-        kVideoFrameQueueSize);
+    return pushVideoFrame(&g_videoFrameQueue, frame, kVideoFrameQueueSize);
 }
 
 static bool receiveDecodedVideoFrames()
@@ -1156,14 +1310,16 @@ static void videoDecodeThreadMain()
 }
 
 
-static bool startPlaybackThreads()
+static bool startPlaybackThreads(bool paused, bool outputStarted)
 {
+    if (ffmpegCancellationRequested())
+        return false;
     clearMediaPacketQueue(&g_audioPacketQueue);
     clearMediaPacketQueue(&g_videoPacketQueue);
     clearVideoFrameQueue(&g_videoFrameQueue);
 
-    g_playbackPaused.store(false);
-    g_outputStarted.store(false);
+    g_playbackPaused.store(paused);
+    g_outputStarted.store(outputStarted);
     g_videoDecodeFinished.store(false);
     g_audioDecodeFinished.store(
         g_audioStreamIndex < 0);
@@ -1224,11 +1380,7 @@ bool decodeNextFfmpegFrame(DecodedVideoFrame* output)
 
     g_displayFrame = std::move(frame);
 
-    output->data = g_displayFrame.pixels.data();
-    output->width = g_displayFrame.width;
-    output->height = g_displayFrame.height;
-    output->stride = g_displayFrame.stride;
-    output->ptsSeconds = g_displayFrame.ptsSeconds;
+    decodedFrameView(g_displayFrame,output);
     return true;
 }
 
@@ -1277,6 +1429,7 @@ void closeFfmpegVideo()
     clearMediaPacketQueue(&g_videoPacketQueue);
     clearVideoFrameQueue(&g_videoFrameQueue);
     g_displayFrame = {};
+    g_buffering.store(false);
     g_videoDecodeFinished.store(false);
     g_audioDecodeFinished.store(true);
 
@@ -1284,6 +1437,7 @@ void closeFfmpegVideo()
     {
         // 停止所有尚未播放完成的音频。
         waveOutReset(g_audioOutput);
+        waveOutSetVolume(g_audioOutput, g_audioDeviceOriginalVolume);
 
         for (int i = 0; i < kAudioBufferCount; ++i)
         {
@@ -1303,6 +1457,7 @@ void closeFfmpegVideo()
         waveOutClose(g_audioOutput);
         g_audioOutput = nullptr;
     }
+    if(g_audioCompletionEvent){CloseHandle(g_audioCompletionEvent);g_audioCompletionEvent=nullptr;}
 
     g_nextAudioBuffer = 0;
 
@@ -1332,16 +1487,35 @@ void closeFfmpegVideo()
 
   g_audioPtsLogCount = 0;
   g_audioStartPtsSeconds.store(-1.0);
+  g_seekTargetSeconds = -1.0;
+  g_previewTailFrame = {};
+
+  g_playbackRate.store(1.0);
+  g_videoClockSeconds = 0.0;
+  g_videoClockLastTickMs = 0;
+  g_videoClockValid = false;
+  g_durationSeconds = 0.0;
+  g_effectiveBackend = VideoDecoderBackend::Auto;
+  g_audioMutedForRate = false;
+  g_audioVolume = 1.0f;
+  g_audioVolumeBeforeMute = 0xFFFFFFFF;
+  g_audioDeviceOriginalVolume = 0xFFFFFFFF;
+  g_playbackEndReason.store(PlaybackEndReason::None);
 
 }
 
 void setFfmpegAudioPaused(bool paused)
 {
+    // Capture the running interval before freezing; discard the paused interval
+    // when resuming, even if the worker never ticked while paused.
+    advanceFfmpegPlaybackClock();
+    std::lock_guard<std::mutex> outputLock(g_audioOutputMutex);
     g_playbackPaused.store(paused);
+    g_videoClockLastTickMs = GetTickCount64();
 
     if (!g_audioOutput)
         return;
-    if (paused)
+    if (paused || g_buffering.load())
     {
         waveOutPause(g_audioOutput);
     }
@@ -1353,6 +1527,7 @@ void setFfmpegAudioPaused(bool paused)
 
 void startFfmpegPlayback()
 {
+    g_videoClockLastTickMs = GetTickCount64();
     g_outputStarted.store(true);
 }
 
@@ -1362,7 +1537,7 @@ double getFfmpegAudioClockSeconds()
     double startPts =
         g_audioStartPtsSeconds.load();
 
-    if(!g_audioOutput ||
+    if(!g_audioOutput || g_playbackRate.load() != 1.0 ||
        g_audioSampleRate <= 0 ||
        startPts < 0.0 ||
        g_audioDecodeFinished.load())
@@ -1393,4 +1568,336 @@ double getFfmpegAudioClockSeconds()
     }
     return -1.0;
     
+}
+
+static double getVideoClockSeconds()
+{
+    return g_videoClockValid ? g_videoClockSeconds : -1.0;
+}
+
+static void resetVideoClock(double seconds)
+{
+    g_videoClockSeconds = seconds < 0.0 ? 0.0 : seconds;
+    g_videoClockLastTickMs = GetTickCount64();
+    g_videoClockValid = true;
+}
+
+void anchorFfmpegVideoClock(double ptsSeconds)
+{
+    if (!g_formatContext || !std::isfinite(ptsSeconds) || ptsSeconds < 0.0)
+        return;
+
+    resetVideoClock(ptsSeconds);
+}
+
+static void applyFfmpegVolume()
+{
+    const DWORD channel = static_cast<DWORD>(g_audioVolume * 65535.0f + 0.5f);
+    g_audioVolumeBeforeMute = channel | (channel << 16);
+    if (g_audioOutput)
+        waveOutSetVolume(g_audioOutput,
+            g_audioMutedForRate ? 0 : g_audioVolumeBeforeMute);
+}
+
+void setFfmpegVolume(float normalized)
+{
+    if (!std::isfinite(normalized))
+        return;
+
+    std::lock_guard<std::mutex> outputLock(g_audioOutputMutex);
+    g_audioVolume = std::clamp(normalized, 0.0f, 1.0f);
+    applyFfmpegVolume();
+}
+
+static void muteFfmpegAudio(bool muted)
+{
+    std::lock_guard<std::mutex> outputLock(g_audioOutputMutex);
+    g_audioMutedForRate = muted;
+    applyFfmpegVolume();
+}
+
+double getFfmpegDurationSeconds()
+{
+    return g_durationSeconds;
+}
+
+VideoDecoderBackend getFfmpegEffectiveBackend()
+{
+    return g_effectiveBackend;
+}
+
+void requestFfmpegAbort()
+{
+    // No FFmpeg, WaveOut, queue or clock access is allowed on the UI thread.
+    g_abortRequested.store(true);
+}
+
+double getFfmpegPlaybackClockSeconds()
+{
+    if (g_playbackRate.load() == 1.0)
+    {
+        double audioClock = getFfmpegAudioClockSeconds();
+        if (audioClock >= 0.0)
+            return audioClock;
+
+        return getVideoClockSeconds();
+    }
+
+    return getVideoClockSeconds();
+}
+
+void advanceFfmpegPlaybackClock()
+{
+    if (!g_videoClockValid)
+        return;
+
+    const ULONGLONG now = GetTickCount64();
+    const double elapsed =
+        static_cast<double>(now - g_videoClockLastTickMs) / 1000.0;
+
+    g_videoClockLastTickMs = now;
+    if (g_playbackPaused.load() || g_buffering.load() || !g_outputStarted.load() ||
+        !g_playbackRunning.load())
+        return;
+
+    // Keep a wall clock anchored to usable audio, then carry on at 1x when
+    // audio is missing, unavailable or drained before the last video frame.
+    const double audioClock = g_playbackRate.load() == 1.0
+        ? getFfmpegAudioClockSeconds() : -1.0;
+    if (audioClock >= 0.0)
+        g_videoClockSeconds = audioClock;
+    else
+        g_videoClockSeconds += elapsed * g_playbackRate.load();
+}
+
+bool seekFfmpegToPosition(double targetSeconds)
+{
+    if (!g_formatContext || !g_playbackRunning.load() ||
+        ffmpegCancellationRequested() || !std::isfinite(targetSeconds))
+        return false;
+
+    if (targetSeconds < 0.0)
+        targetSeconds = 0.0;
+    if (g_durationSeconds > 0.0)
+        targetSeconds = (std::min)(targetSeconds, g_durationSeconds);
+    if (targetSeconds >= static_cast<double>((std::numeric_limits<int64_t>::max)()) /
+        AV_TIME_BASE)
+        return false;
+
+    const bool wasPaused = g_playbackPaused.load();
+    const bool wasStarted = g_outputStarted.load();
+    // Interrupt a blocked network read before joining the demux thread.
+    g_abortRequested.store(true);
+    g_playbackRunning.store(false);
+
+    stopMediaPacketQueue(&g_audioPacketQueue);
+    stopMediaPacketQueue(&g_videoPacketQueue);
+    stopVideoFrameQueue(&g_videoFrameQueue);
+
+    if (g_demuxThread.joinable())
+        g_demuxThread.join();
+    if (g_audioDecodeThread.joinable())
+        g_audioDecodeThread.join();
+    if (g_videoDecodeThread.joinable())
+        g_videoDecodeThread.join();
+
+    g_previewTailFrame = {};
+    if (g_audioOutput)
+    {
+        waveOutReset(g_audioOutput);
+
+        for (int i = 0; i < kAudioBufferCount; ++i)
+        {
+            if ((g_audioHeaders[i].dwFlags & WHDR_PREPARED) != 0)
+            {
+                waveOutUnprepareHeader(
+                    g_audioOutput,
+                    &g_audioHeaders[i],
+                    sizeof(g_audioHeaders[i]));
+            }
+
+            g_audioHeaders[i] = {};
+            g_audioBuffers[i].clear();
+        }
+    }
+
+    g_nextAudioBuffer = 0;
+    g_audioStartPtsSeconds.store(-1.0);
+
+    if (g_audioCodecContext)
+        avcodec_flush_buffers(g_audioCodecContext);
+    if (g_audioResampleContext)
+    {
+        swr_close(g_audioResampleContext);
+        if (swr_init(g_audioResampleContext) < 0)
+            return false;
+    }
+    if (g_videoDecoder)
+        g_videoDecoder->flush();
+    if (g_videoBsf)
+        av_bsf_flush(g_videoBsf);
+
+    clearMediaPacketQueue(&g_audioPacketQueue);
+    clearMediaPacketQueue(&g_videoPacketQueue);
+    clearVideoFrameQueue(&g_videoFrameQueue);
+
+    g_abortRequested.store(false);
+    if (ffmpegCancellationRequested())
+        return false;
+    // A previously interrupted AVIO read must not poison the new seek.
+    if (g_formatContext->pb)
+    {
+        g_formatContext->pb->error = 0;
+        g_formatContext->pb->eof_reached = 0;
+    }
+    const int64_t targetTimestamp =
+        static_cast<int64_t>(targetSeconds * AV_TIME_BASE);
+    const int seekResult = av_seek_frame(
+        g_formatContext,
+        -1,
+        targetTimestamp,
+        AVSEEK_FLAG_BACKWARD);
+
+    if (seekResult < 0 || ffmpegCancellationRequested())
+    {
+        printFfmpegError("av_seek_frame", seekResult);
+        // The worker can report this failure and subsequently close or reopen.
+        // Do not advertise a target clock which the demuxer never reached.
+        g_playbackEndReason.store(PlaybackEndReason::DemuxError);
+        g_videoDecodeFinished.store(true);
+        g_audioDecodeFinished.store(true);
+        g_outputStarted.store(false);
+        g_displayFrame = {};
+        return false;
+    }
+
+    g_videoDecodeFinished.store(false);
+    g_audioDecodeFinished.store(g_audioStreamIndex < 0);
+    g_playbackEndReason.store(PlaybackEndReason::None);
+    g_displayFrame = {};
+    g_outputStarted.store(false);
+    g_seekTargetSeconds = targetSeconds;
+
+    resetVideoClock(targetSeconds);
+
+    if (ffmpegCancellationRequested() || !startPlaybackThreads(wasPaused, wasStarted))
+        return false;
+
+    setFfmpegAudioPaused(wasPaused);
+    return true;
+}
+
+bool previewFfmpegAtPosition(double seconds, DecodedVideoFrame* frame)
+{
+    if (!frame || !std::isfinite(seconds) || ffmpegCancellationRequested())
+        return false;
+    *frame = {};
+    const bool wasStarted = g_outputStarted.exchange(false);
+    setFfmpegAudioPaused(true);
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    g_previewDeadlineMs.store(deadline);
+    bool ready = seekFfmpegToPosition(seconds);
+    if (ready)
+    {
+        // Pause the actual device throughout preview, but let demux/video
+        // process keyframe preroll. Audio packets are retained for resume.
+        g_playbackPaused.store(false);
+        ready = false;
+        while (GetTickCount64() < deadline && !ffmpegCancellationRequested())
+        {
+            if (decodeNextFfmpegFrame(frame))
+            {
+                ready = true;
+                break;
+            }
+            if (isFfmpegVideoFinished())
+            {
+                // A timestamp denotes a frame's start. At the end of video,
+                // the final frame still covers the interval up to EOF even
+                // though no frame starts at/after the requested tail position.
+                if (getFfmpegPlaybackEndReason() == PlaybackEndReason::Completed &&
+                    !g_previewTailFrame.pixels.empty())
+                {
+                    g_displayFrame = std::move(g_previewTailFrame);
+                    decodedFrameView(g_displayFrame,frame);
+                    ready = true;
+                }
+                break;
+            }
+            Sleep(1);
+        }
+    }
+    setFfmpegAudioPaused(true);
+    g_outputStarted.store(wasStarted);
+    ready = ready && !ffmpegCancellationRequested();
+    g_previewDeadlineMs.store(0);
+    if (!ready)
+        *frame = {};
+    return ready;
+}
+
+void setFfmpegPlaybackRate(double rate)
+{
+    if (!std::isfinite(rate) || rate <= 0.0)
+        rate = 1.0;
+
+    const double oldRate = g_playbackRate.load();
+    if (rate == oldRate)
+        return;
+
+    advanceFfmpegPlaybackClock();
+
+    if (oldRate == 1.0)
+    {
+        double anchor = getFfmpegPlaybackClockSeconds();
+        if (anchor < 0.0)
+            anchor = g_displayFrame.ptsSeconds >= 0.0
+                ? g_displayFrame.ptsSeconds
+                : 0.0;
+
+        resetVideoClock(anchor);
+        muteFfmpegAudio(true);
+    }
+
+    bool restartOutput = false;
+    if (rate == 1.0)
+    {
+        // Gate the old thread before changing rate/unmuting, and keep the new
+        // thread gated until the seek has reset WaveOut and joined the old one.
+        std::lock_guard<std::mutex> outputLock(g_audioOutputMutex);
+        restartOutput = g_outputStarted.exchange(false);
+    }
+    g_playbackRate.store(rate);
+    g_audioPacketQueue.condition.notify_all();
+
+    if (rate == 1.0)
+    {
+        // The restarted audio thread may run before seek returns. Restore
+        // volume first so its initial target PCM cannot be discarded as muted.
+        muteFfmpegAudio(false);
+        if (seekFfmpegToPosition(getVideoClockSeconds()))
+            g_outputStarted.store(restartOutput);
+    }
+}
+
+double getFfmpegPlaybackRate()
+{
+    return g_playbackRate.load();
+}
+
+bool seekFfmpegBySeconds(double deltaSeconds)
+{
+    double position = getFfmpegPlaybackClockSeconds();
+    if (position < 0.0)
+        position = 0.0;
+
+    return seekFfmpegToPosition(position + deltaSeconds);
+}
+
+void setFfmpegNativeYuvOutput(bool enabled){g_nativeYuvOutput=enabled;}
+std::uint64_t getFfmpegAudioCompletionCount(){return g_audioCompletions.load();}
+void setFfmpegBuffering(bool buffering){
+    g_buffering.store(buffering);g_videoClockLastTickMs=GetTickCount64();
+    std::lock_guard<std::mutex> lock(g_audioOutputMutex);
+    if(g_audioOutput){if(buffering)waveOutPause(g_audioOutput);else if(!g_playbackPaused.load())waveOutRestart(g_audioOutput);}
 }

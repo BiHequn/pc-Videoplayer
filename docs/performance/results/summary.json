@@ -1,0 +1,85 @@
+[
+    {
+        "resolution":  "720p",
+        "native_repeats":  3,
+        "bgra_repeats":  3,
+        "comparison_status":  "comparable observations",
+        "comparison_reasons":  "",
+        "comparison_gate":  {
+                                "comparable":  true,
+                                "reasons":  [
+
+                                            ],
+                                "required_session_drops":  0,
+                                "required_observer_misses":  0,
+                                "required_unaccounted_frames":  0
+                            },
+        "native_cpu_median_seconds":  0.5,
+        "bgra_cpu_median_seconds":  0.578125,
+        "native_cpu_reduction_percent":  13.513513513513514,
+        "native_rss_median_mib":  117.0078125,
+        "bgra_rss_median_mib":  147.3515625,
+        "native_delivered_frames_median":  120,
+        "bgra_delivered_frames_median":  120,
+        "native_drop_total":  0,
+        "bgra_drop_total":  0,
+        "native_observer_missed_total":  0,
+        "bgra_observer_missed_total":  0
+    },
+    {
+        "resolution":  "1080p",
+        "native_repeats":  3,
+        "bgra_repeats":  3,
+        "comparison_status":  "comparable observations",
+        "comparison_reasons":  "",
+        "comparison_gate":  {
+                                "comparable":  true,
+                                "reasons":  [
+
+                                            ],
+                                "required_session_drops":  0,
+                                "required_observer_misses":  0,
+                                "required_unaccounted_frames":  0
+                            },
+        "native_cpu_median_seconds":  0.84375,
+        "bgra_cpu_median_seconds":  0.84375,
+        "native_cpu_reduction_percent":  0,
+        "native_rss_median_mib":  153.31640625,
+        "bgra_rss_median_mib":  227.2578125,
+        "native_delivered_frames_median":  120,
+        "bgra_delivered_frames_median":  120,
+        "native_drop_total":  0,
+        "bgra_drop_total":  0,
+        "native_observer_missed_total":  0,
+        "bgra_observer_missed_total":  0
+    },
+    {
+        "resolution":  "4k",
+        "native_repeats":  3,
+        "bgra_repeats":  3,
+        "comparison_status":  "inconclusive",
+        "comparison_reasons":  "bgra repeat 1 fails complete-frame gate (zero drops/misses/unaccounted frames required). native-yuv repeat 3 fails complete-frame gate (zero drops/misses/unaccounted frames required). bgra repeat 3 fails complete-frame gate (zero drops/misses/unaccounted frames required).",
+        "comparison_gate":  {
+                                "comparable":  false,
+                                "reasons":  [
+                                                "bgra repeat 1 fails complete-frame gate (zero drops/misses/unaccounted frames required).",
+                                                "native-yuv repeat 3 fails complete-frame gate (zero drops/misses/unaccounted frames required).",
+                                                "bgra repeat 3 fails complete-frame gate (zero drops/misses/unaccounted frames required)."
+                                            ],
+                                "required_session_drops":  0,
+                                "required_observer_misses":  0,
+                                "required_unaccounted_frames":  0
+                            },
+        "native_cpu_median_seconds":  3.1875,
+        "bgra_cpu_median_seconds":  4.890625,
+        "native_cpu_reduction_percent":  null,
+        "native_rss_median_mib":  330.9375,
+        "bgra_rss_median_mib":  605.4375,
+        "native_delivered_frames_median":  120,
+        "bgra_delivered_frames_median":  119,
+        "native_drop_total":  0,
+        "bgra_drop_total":  0,
+        "native_observer_missed_total":  1,
+        "bgra_observer_missed_total":  2
+    }
+]

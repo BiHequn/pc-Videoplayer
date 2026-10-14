@@ -1,4 +1,5 @@
 #include "video-frame-queue.h"
+#include "video-frame-copy.h"
 #include<utility>
 
 
@@ -52,6 +53,14 @@ bool tryPopVideoFrame(VideoFrameQueue* queue, QueuedVideoFrame* output)
 		queue->condition.notify_all();
 		
 		return true;
+}
+
+bool pushVideoFrame(VideoFrameQueue* queue,const DecodedVideoFrame& source,size_t maxFrameCount) {
+    if(!queue||!maxFrameCount)return false;QueuedVideoFrame frame;
+    if(!copyVideoFrame(source,&frame))return false;
+    std::unique_lock<std::mutex> lock(queue->mutex);
+    queue->condition.wait(lock,[&]{return queue->stopped||queue->frames.size()<maxFrameCount;});
+    if(queue->stopped)return false;queue->frames.push_back(std::move(frame));lock.unlock();queue->condition.notify_all();return true;
 }
 
 void finishVideoFrameQueue(VideoFrameQueue* queue)

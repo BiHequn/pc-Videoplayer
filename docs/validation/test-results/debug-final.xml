@@ -1,0 +1,66 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Win32-MSBuild" tests="21" failures="0" disabled="0" skipped="0" time="254" timestamp="2026-10-13T20:25:45">
+  <testcase name="desktop-state" classname="desktop-state" time="18.8986" status="run">
+    <properties />
+  </testcase>
+  <testcase name="desktop-history" classname="desktop-history" time="8.63228" status="run">
+    <properties />
+  </testcase>
+  <testcase name="delivery-fault" classname="delivery-fault" time="5.48307" status="run">
+    <properties />
+  </testcase>
+  <testcase name="player-soak-smoke" classname="player-soak-smoke" time="3.16412" status="run">
+    <properties />
+  </testcase>
+  <testcase name="cache-robustness" classname="cache-robustness" time="3.8976" status="run">
+    <properties />
+  </testcase>
+  <testcase name="audio-callback" classname="audio-callback" time="0.465211" status="run">
+    <properties />
+  </testcase>
+  <testcase name="cache-controller" classname="cache-controller" time="11.5729" status="run">
+    <properties />
+  </testcase>
+  <testcase name="network-session" classname="network-session" time="30.4417" status="run">
+    <properties />
+  </testcase>
+  <testcase name="service-integration" classname="service-integration" time="33.8582" status="run">
+    <properties />
+  </testcase>
+  <testcase name="native-yuv" classname="native-yuv" time="0.271537" status="run">
+    <properties />
+  </testcase>
+  <testcase name="opengl-renderer" classname="opengl-renderer" time="1.11457" status="run">
+    <properties />
+  </testcase>
+  <testcase name="frame-copy" classname="frame-copy" time="0.180095" status="run">
+    <properties />
+  </testcase>
+  <testcase name="cache-integration" classname="cache-integration" time="2.10292" status="run">
+    <properties />
+  </testcase>
+  <testcase name="generate-stream-fixtures" classname="generate-stream-fixtures" time="1.35556" status="run">
+    <properties />
+  </testcase>
+  <testcase name="cache-playback" classname="cache-playback" time="70.7272" status="run">
+    <properties />
+  </testcase>
+  <testcase name="media-controls" classname="media-controls" time="16.0812" status="run">
+    <properties />
+  </testcase>
+  <testcase name="generate-fixtures" classname="generate-fixtures" time="0.335369" status="run">
+    <properties />
+  </testcase>
+  <testcase name="playback-session" classname="playback-session" time="5.12721" status="run">
+    <properties />
+  </testcase>
+  <testcase name="desktop-smoke" classname="desktop-smoke" time="3.05132" status="run">
+    <properties />
+  </testcase>
+  <testcase name="desktop-d3d11-smoke" classname="desktop-d3d11-smoke" time="1.69624" status="run">
+    <properties />
+  </testcase>
+  <testcase name="second-layer-desktop" classname="second-layer-desktop" time="36.4141" status="run">
+    <properties />
+  </testcase>
+</testsuite>
